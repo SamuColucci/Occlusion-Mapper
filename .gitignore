@@ -1,0 +1,14 @@
+# Dati pesanti
+data/
+nuscenes/
+*.json
+*.png
+
+# Cache di Python
+__pycache__/
+*.pyc
+
+# Cartelle degli IDE
+.vscode/
+.idea/
+.gemini/
