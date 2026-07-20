@@ -1,8 +1,10 @@
-# Dati pesanti
+# Dati pesanti e Documenti Personali
 data/
 nuscenes/
 *.json
 *.png
+*.xls
+*.xlsx
 
 # Cache di Python
 __pycache__/
