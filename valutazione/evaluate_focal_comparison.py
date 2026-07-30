@@ -1,5 +1,12 @@
-# Benchmark di Valutazione su Ground Truth Sintetica ad Alta Densità a 6 Classi (evaluate_synthetic_gt_comparison.py)
-# Valuta i 6 modelli del progetto su una Ground Truth arricchita con ostacoli sintetici verosimili (Auto, Camion, Pedoni, Moto, Bici, Barriere).
+# Script di Valutazione e Confronto Comparativo tra Modelli Neurali e Bayesiani (evaluate_focal_comparison.py)
+# Confronta a schermo TUTTE le Varianti del Progetto (7 Approcci):
+#   1. Agente Bayesiano Dinamico (Prior HD)
+#   2. Agente Neurale Baseline BCE -> per_zone_checkpoint.pth
+#   3. Agente Neurale BCE + Penalizzazione Semantica -> per_zone_checkpoint_semantica.pth
+#   4. Agente Neurale Focal Loss Standard -> per_zone_checkpoint_focal.pth
+#   5. Agente Neurale Focal Loss + Penalizzazione Semantica -> per_zone_checkpoint_focal_semantica.pth
+#   6. Agente Neurale Contesto Esterno (Ring Semantics) -> per_zone_checkpoint_surrounding.pth
+#   7. Agente Neurale Asymmetric Loss (ASL - CVPR 2021) -> per_zone_checkpoint_asl.pth
 
 import os
 import sys
@@ -8,28 +15,28 @@ import json
 import numpy as np
 import torch
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from per_zone_model import PerZoneModel
 from dataset_generator_per_zone import OcclusionDatasetPerZone
-from ground_truth_extractor import get_occlusion_ground_truth_target
-from ground_truth_extractor_synthetic import generate_synthetic_injected_gt
 
-def run_synthetic_evaluation(threshold=0.30):
+def run_comparative_evaluation(threshold=0.30):
     print("\n" + "=" * 95)
-    print(f"   STRESS TEST SU GROUND TRUTH SINTETICA VEROSIMILE A 6 CLASSI (SOGLIA = {threshold*100:.0f}%)")
-    print("   (Valuta i 6 modelli quando più zone d'ombra contengono ostacoli verosimili distribuiti)")
+    print(f"   CONFRONTO METRICHE COMPLESSIVO TUTTE LE VARIANTI (SOGLIA DECISIONALE = {threshold*100:.0f}%)")
     print("=" * 95 + "\n")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Caricamento Dataset ed iniezione ostacoli sintetici verosimili su NuScenes...")
+    print("Caricamento Dataset ed estrazione Ground Truth nuScenes (6 canali)...")
     ds = OcclusionDatasetPerZone(dataset_name="nuscenes", dataroot="./nuscenes")
     
     categories = ["Auto", "Camion/Bus", "Pedone", "Moto", "Bicicletta", "Barriera"]
     
     def load_model(ckpt_path):
         m = PerZoneModel(num_classes=6).to(device)
-        if os.path.exists(ckpt_path):
+        full_path = os.path.join("pesi_modelli", ckpt_path) if not os.path.exists(ckpt_path) and os.path.exists(os.path.join("pesi_modelli", ckpt_path)) else ckpt_path
+        if os.path.exists(full_path):
             try:
-                m.load_state_dict(torch.load(ckpt_path, map_location=device)['model_state_dict'])
+                m.load_state_dict(torch.load(full_path, map_location=device)['model_state_dict'])
                 m.eval()
                 return m, True
             except Exception:
@@ -41,6 +48,7 @@ def run_synthetic_evaluation(threshold=0.30):
     model_focal, has_focal = load_model("per_zone_checkpoint_focal.pth")
     model_focal_sem, has_focal_sem = load_model("per_zone_checkpoint_focal_semantica.pth")
     model_surr, has_surr = load_model("per_zone_checkpoint_surrounding.pth")
+    model_asl, has_asl = load_model("per_zone_checkpoint_asl.pth")
 
     # Cache Agente Bayesiano
     b_files = glob.glob(os.path.join("extracted_occlusions_probabilities", "*.json"))
@@ -50,38 +58,26 @@ def run_synthetic_evaluation(threshold=0.30):
         with open(fpath, "r") as f:
             b_cache[tok] = json.load(f).get("occlusions", [])
 
-    # Contatori TP, FP, FN per la GT Sintetica
+    # Contatori TP, FP, FN
     bce_tp, bce_fp, bce_fn = np.zeros(6), np.zeros(6), np.zeros(6)
     bce_sem_tp, bce_sem_fp, bce_sem_fn = np.zeros(6), np.zeros(6), np.zeros(6)
     focal_tp, focal_fp, focal_fn = np.zeros(6), np.zeros(6), np.zeros(6)
     focal_sem_tp, focal_sem_fp, focal_sem_fn = np.zeros(6), np.zeros(6), np.zeros(6)
     surr_tp, surr_fp, surr_fn = np.zeros(6), np.zeros(6), np.zeros(6)
+    asl_tp, asl_fp, asl_fn = np.zeros(6), np.zeros(6), np.zeros(6)
     bayes_tp, bayes_fp, bayes_fn = np.zeros(6), np.zeros(6), np.zeros(6)
 
-    bce_viol, bce_sem_viol, focal_viol, focal_sem_viol, surr_viol, bayes_viol = 0, 0, 0, 0, 0, 0
+    # Contatori Violazioni Semantiche
+    bce_viol, bce_sem_viol, focal_viol, focal_sem_viol, surr_viol, asl_viol, bayes_viol = 0, 0, 0, 0, 0, 0, 0
     non_driveable_zones = 0
-    total_injected_obstacles = 0
 
-    synthetic_gt_cache = {}
-    total_frames = len(ds.base_dataset)
-    for idx in range(total_frames):
-        fd = ds.base_dataset.adapter.get_sample_data(idx)
-        tok = fd['sample_token']
-        syn_gt_masks, injected_cnt = generate_synthetic_injected_gt(fd, injection_rate=0.25, seed=42)
-        synthetic_gt_cache[tok] = torch.tensor(syn_gt_masks, dtype=torch.float32)
-        total_injected_obstacles += injected_cnt
-
-    print(f"Iniezione completata: Aggiunti {total_injected_obstacles} ostacoli sintetici verosimili sulle 6 classi.")
-    print("Valutazione automatica dei 6 modelli sulla Ground Truth Sintetica in corso...\n")
-
+    print("\nValutazione automatica su tutti i coni d'ombra per ciascuna variante in corso...")
+    
     with torch.no_grad():
         for sample in ds.samples:
+            target_vec = sample['target'].numpy()
             sample_token = sample['sample_token']
             raw_pts = sample['polygon_points']
-            syn_gt_tensor = synthetic_gt_cache.get(sample_token, sample['target'])
-            
-            target_vec = get_occlusion_ground_truth_target(syn_gt_tensor, raw_pts)
-            
             patch_tensor = sample['patch'].unsqueeze(0).to(device, dtype=torch.float32)
             scalar_tensor = sample['scalars'].unsqueeze(0).to(device, dtype=torch.float32)
             
@@ -106,8 +102,9 @@ def run_synthetic_evaluation(threshold=0.30):
             if has_focal: focal_viol += eval_net(model_focal, focal_tp, focal_fp, focal_fn)
             if has_focal_sem: focal_sem_viol += eval_net(model_focal_sem, focal_sem_tp, focal_sem_fp, focal_sem_fn)
             if has_surr: surr_viol += eval_net(model_surr, surr_tp, surr_fp, surr_fn)
+            if has_asl: asl_viol += eval_net(model_asl, asl_tp, asl_fp, asl_fn)
 
-            # Agente Bayesiano
+            # Bayes
             b_occs = b_cache.get(sample_token, [])
             b_dict = {}
             for b_occ in b_occs:
@@ -134,7 +131,7 @@ def run_synthetic_evaluation(threshold=0.30):
 
     def print_metric_table(title, tp_arr, fp_arr, fn_arr, viol_cnt):
         print("\n" + "=" * 95)
-        print(f"  {title.upper()} (Sintetica GT - Soglia = {threshold*100:.0f}%)")
+        print(f"  {title.upper()} (Soglia = {threshold*100:.0f}%)")
         print("=" * 95)
         print(f" {'Classe':<14} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'IoU':<12} {'TP/FP/FN'}")
         print("-" * 95)
@@ -164,6 +161,8 @@ def run_synthetic_evaluation(threshold=0.30):
         print_metric_table("5. Agente Neurale Focal Loss + Penalizzazione Semantica", focal_sem_tp, focal_sem_fp, focal_sem_fn, focal_sem_viol)
     if has_surr:
         print_metric_table("6. Agente Neurale Contesto Esterno (Ring Semantics)", surr_tp, surr_fp, surr_fn, surr_viol)
+    if has_asl:
+        print_metric_table("7. Agente Neurale Asymmetric Loss (ASL - CVPR 2021)", asl_tp, asl_fp, asl_fn, asl_viol)
 
 if __name__ == "__main__":
-    run_synthetic_evaluation(threshold=0.30)
+    run_comparative_evaluation(threshold=0.30)

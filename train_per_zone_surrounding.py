@@ -14,7 +14,8 @@ from per_zone_model import PerZoneModel
 from dataset_generator_surrounding import OcclusionDatasetSurrounding
 from loss_functions import FocalLoss_penalizzazione_zona_semantica
 
-def train_surrounding_model(epochs=20, batch_size=32, lr=1e-3, checkpoint_path="per_zone_checkpoint_surrounding.pth"):
+def train_surrounding_model(epochs=20, batch_size=32, lr=1e-3, checkpoint_path=os.path.join("pesi_modelli", "per_zone_checkpoint_surrounding.pth")):
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     print("\n" + "=" * 80)
     print("   ADDESTRAMENTO VARIANTE CONTESTO ESTERNO (SURROUNDING RING SEMANTICS - 20 EPOCHE)")
     print("=" * 80)

@@ -163,14 +163,19 @@ class PerZoneOcclusionAgent:
         
         # Selezione automatica del miglior checkpoint disponibile se non fornito esplicitamente
         if checkpoint_path is None:
-            candidates = [
+            raw_candidates = [
                 "per_zone_checkpoint_focal_semantica.pth",
+                "per_zone_checkpoint_asl.pth",
                 "per_zone_checkpoint_surrounding.pth",
                 "per_zone_checkpoint_focal.pth",
                 "per_zone_checkpoint_semantica.pth",
                 "per_zone_checkpoint.pth"
             ]
-            checkpoint_path = next((c for c in candidates if os.path.exists(c)), "per_zone_checkpoint.pth")
+            candidates = []
+            for c in raw_candidates:
+                candidates.append(os.path.join("pesi_modelli", c))
+                candidates.append(c)
+            checkpoint_path = next((c for c in candidates if os.path.exists(c)), os.path.join("pesi_modelli", "per_zone_checkpoint_focal_semantica.pth"))
 
         self.checkpoint_used = checkpoint_path
         if os.path.exists(checkpoint_path):

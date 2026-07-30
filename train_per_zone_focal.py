@@ -15,7 +15,8 @@ from per_zone_model import PerZoneModel
 from dataset_generator_per_zone import OcclusionDatasetPerZone
 from loss_functions import FocalLoss
 
-def train_focal_model(epochs=20, batch_size=32, lr=1e-3, checkpoint_path="per_zone_checkpoint_focal.pth"):
+def train_focal_model(epochs=20, batch_size=32, lr=1e-3, checkpoint_path=os.path.join("pesi_modelli", "per_zone_checkpoint_focal.pth")):
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     print("\n" + "=" * 75)
     print("   ADDESTRAMENTO VARIANTE 1: FOCAL LOSS + COSINE ANNEALING LR (20 EPOCHE)")
     print("=" * 75)

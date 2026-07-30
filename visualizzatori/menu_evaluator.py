@@ -25,12 +25,12 @@ MODEL_NAMES = [
 
 MODEL_CKPTS = [
     None,  # Bayes
-    "per_zone_checkpoint.pth",
-    "per_zone_checkpoint_semantica.pth",
-    "per_zone_checkpoint_focal.pth",
-    "per_zone_checkpoint_focal_semantica.pth",
-    "per_zone_checkpoint_surrounding.pth",
-    "per_zone_checkpoint_asl.pth"
+    os.path.join("pesi_modelli", "per_zone_checkpoint.pth"),
+    os.path.join("pesi_modelli", "per_zone_checkpoint_semantica.pth"),
+    os.path.join("pesi_modelli", "per_zone_checkpoint_focal.pth"),
+    os.path.join("pesi_modelli", "per_zone_checkpoint_focal_semantica.pth"),
+    os.path.join("pesi_modelli", "per_zone_checkpoint_surrounding.pth"),
+    os.path.join("pesi_modelli", "per_zone_checkpoint_asl.pth")
 ]
 
 CATEGORIES = ["Auto", "Camion/Bus", "Pedone", "Moto", "Bicicletta", "Barriera"]

@@ -15,7 +15,8 @@ from per_zone_model import PerZoneModel
 from dataset_generator_per_zone import OcclusionDatasetPerZone
 from loss_functions import WeightedBCESemanticLoss
 
-def train_per_zone_model(epochs=10, batch_size=32, lr=1e-3, checkpoint_path="per_zone_checkpoint.pth"):
+def train_per_zone_model(epochs=10, batch_size=32, lr=1e-3, checkpoint_path=os.path.join("pesi_modelli", "per_zone_checkpoint.pth")):
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     print("\n" + "=" * 70)
     print("      ADDESTRAMENTO RETE NEURALE PER-ZONE (PATCH 64x64 + SCALARI)")
     print("=" * 70)

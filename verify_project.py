@@ -55,7 +55,7 @@ def main():
             run_script([os.path.join("visualizzatori", "verify_runtime_per_zone.py")])
         elif choice == '3':
             print("\nAvvio Valutazione Metriche Ground Truth...")
-            run_script(["evaluate_focal_comparison.py"])
+            run_script([os.path.join("valutazione", "evaluate_focal_comparison.py")])
             input("\nPremi INVIO per tornare al menu...")
         elif choice == '4':
             print("\nAvvio Calcolo Probabilità Condizionate Bayesiane...")

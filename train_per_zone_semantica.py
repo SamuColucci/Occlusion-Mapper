@@ -14,7 +14,8 @@ from per_zone_model import PerZoneModel
 from dataset_generator_per_zone import OcclusionDatasetPerZone
 from loss_functions import WeightedBCESemanticLoss_penalizzazione_zona_semantica
 
-def train_bce_semantica_model(epochs=10, batch_size=32, lr=1e-3, checkpoint_path="per_zone_checkpoint_semantica.pth"):
+def train_bce_semantica_model(epochs=10, batch_size=32, lr=1e-3, checkpoint_path=os.path.join("pesi_modelli", "per_zone_checkpoint_semantica.pth")):
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     print("\n" + "=" * 75)
     print("   ADDESTRAMENTO VARIANTE: BCE LOSS + PENALIZZAZIONE ZONA SEMANTICA (10 EPOCHE)")
     print("=" * 75)

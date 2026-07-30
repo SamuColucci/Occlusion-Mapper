@@ -9,6 +9,7 @@ ENV/
 
 # Checkpoint Pesi Neurali
 *.pth
+pesi_modelli/
 
 # File JSON e Cache di estrazione
 *.json
