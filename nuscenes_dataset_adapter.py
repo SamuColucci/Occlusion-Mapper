@@ -138,57 +138,23 @@ class NuscenesDatasetAdapter(AdapterDataset):
         # Salviamo in nusc_map l'oggetto MappaVettoriale associata alla scena corrente
         nusc_map = NuScenesMap(dataroot=self.dataroot, map_name=map_name)
 
-        # Impostiamo la distanza massima dal ego vehicle (nostro centro di interesse) per la quale vogliamo analizzare l'occlusione
-        range_m = 50
-
-        # Definiamo l'area di interesse, quadrata, centrata sul ego vehicle
-        box_coords = (tx- range_m, ty- range_m, tx+ range_m, ty+ range_m)
-
-        # Creiamo un dizionario con i 4 layer semantici del dataset NuScenes, per separare le varie parti della mappa
-        # 'drivable_area': area percorribile dai veicoli
-        # 'walkway': area pedonale
-        # 'carpark_area': area di parcheggio
-        # 'ped_crossing': attraversamento pedonale
+                # Angolo di direzione (yaw) dell'auto robot in gradi
+        yaw_deg = np.degrees(q.yaw_pitch_roll[0])
+        
+        # Patch rettangolare di 80m x 80m centrato sull'auto robot
+        patch_box = (tx, ty, 80, 80)
+        layer_names = ['drivable_area', 'walkway', 'carpark_area', 'ped_crossing']
+        
+        # Generazione diretta delle maschere binarie 2D (200x200) traslate e ruotate perfettamente
+        map_masks = nusc_map.get_map_mask(patch_box, yaw_deg, layer_names, canvas_size=(200, 200))
+        
         semantic_map = {
-            'drivable_area': [],
-            'walkway': [],
-            'carpark_area': [],
-            'ped_crossing': []
+            'drivable_area': map_masks[0],
+            'walkway': map_masks[1],
+            'carpark_area': map_masks[2],
+            'ped_crossing': map_masks[3]
         }
 
-        # Estrazione dei record di ogni layer semantico
-        for layer in ['drivable_area', 'walkway', 'carpark_area', 'ped_crossing']:
-            # records è un dizionario
-            # Estrazione del record di ogni layer semantico all'interno del patch di interesse
-            records = nusc_map.get_records_in_patch(box_coords, layer_names=[layer], mode = 'intersect')
-            # Estrazione dei token dei record
-            tokens = records.get(layer, [])
-
-            # Per ogni token, estraiamo i poligoni associati
-            for token in tokens:
-                # Estrazione del record
-                record = nusc_map.get(layer, token)
-                # Estrazione dei token dei poligoni (drivable_area usa la lista polygon_tokens, gli altri usano polygon_token singolo)
-                polygon_tokens = record.get('polygon_tokens', [])
-                # (drivable_area usa la lista polygon_tokens, gli altri usano polygon_token singolo)
-                if 'polygon_token' in record:
-                    polygon_tokens.append(record['polygon_token'])
-
-                for polygon_token in polygon_tokens:
-                    # Estrazione del poligono
-                    polygon = nusc_map.extract_polygon(polygon_token)
-                    # Coordinate del poligono, formato da una lista di coordinate 
-                    coords = np.array(polygon.exterior.coords)
-
-                    # Prendiamo solo le coordinate X, Y (ignoriamo Z se presente)
-                    coords_2d = coords[:, :2]
-                    # Traslazione: sottraiamo la posizione dell'auto
-                    coords_traslate = coords_2d - np.array([tx, ty])
-                    # Rotazione inversa: allineiamo al sistema locale dell'auto, per far coincidere asse X con asse frontale del veicolo
-                    coords_locali = coords_traslate @ R_inv[:2, :2].T
-
-                    # Aggiunta del poligono al dizionario semantico
-                    semantic_map[layer].append(coords_locali)
         # Preparazione del dizionario contenente i dati del sample
         return {
             "lidar_token": lidar_token,

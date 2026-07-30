@@ -8,7 +8,30 @@
 
 - ray_casting.py: file contenente la logica di ray casting al fine di trovare le zone note, occluse
 
-- estrazione_zone_occluse.py: file principale che utilizza l'adapter per estrarre le zone occluse dal dataset NuScenes
+- estrazione_zone_occluse.py: file principale che utilizza l'adapter per estrarre le zone occluse dal dataset NuScenes e salvare i dati in formato JSON
+
+- conditional_probability_occlusion_zone.py: file per calcolare la probabilità condizionata di trovare una determinata categoria di ostacoli in base al tipo di superficie semantica del terreno
+
+- conditional_probability_dataset.py: file per analizzare i frame estratti in precedenza al fine di calcolare la probabilità condizionata secondo le regole scritte in conditional_probability_occlusion_zone.py
+
+- unet_model.py: file contenente il modello UNet 2D per la predizione delle mappe di calore
+
+- neural_occlusion_agent.py: file contenente l'agente neurale per la predizione delle mappe di calore
+
+- train_unet.py: file per addestrare il modello UNet 2D
+
+- per_zone_model.py: rete neurale ibrida multimodale per la classificazione probabilistica diretta delle singole zone d'ombra
+
+- dataset_generator_per_zone.py: generatore dei patch visivi (64x64) e delle feature scalari per-zone
+
+- per_zone_occlusion_agent.py: agente neurale di inferenza per la stima e salvataggio dei dati probabilistici per-zone
+
+- train_per_zone.py: script per addestrare il modello ibrido PerZoneModel
+
+- visualizzatori/verify_runtime_neural_heatmap.py: visualizzatore della mappa di colore continua (heatmap 2D pixel-wise 200x200) generata dalla UNet 2D
+
+- visualizzatori/verify_runtime_triple_comparison.py: visualizzatore comparativo sincronizzato in parallelo tra i 3 approcci (Bayesiano, UNet 2D Heatmap e Rete Neurale Per-Zone)
+
 
 Fonti usate nel file estrazione_zone_occluse.py:
 - High_resolution_maps_from_wide_angle_sonar.pdf

@@ -1,16 +1,29 @@
-# Dati pesanti e Documenti Personali
-data/
+# Dataset pesante
 nuscenes/
+data/
+
+# Ambiente Virtuale Python
+.venv/
+venv/
+ENV/
+
+# Checkpoint Pesi Neurali
+*.pth
+
+# File JSON e Cache di estrazione
 *.json
+
+# Rendering grafici ed esportazioni
 *.png
 *.xls
 *.xlsx
+*.csv
 
 # Cache di Python
 __pycache__/
 *.pyc
 
-# Cartelle degli IDE
+# Cartelle IDE e Gemini Agent
 .vscode/
 .idea/
 .gemini/

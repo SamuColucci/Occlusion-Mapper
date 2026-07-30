@@ -1,20 +1,14 @@
-"""
-Dashboard Centrale di Controllo e Verifica del Progetto.
-
-Questo script funge da menu interattivo centralizzato per avviare 
-qualunque strumento di visualizzazione o validazione del progetto
-senza dover digitare comandi complessi da terminale.
-"""
+# Dashboard Centrale di Controllo e Verifica del Progetto Occlusion-Mapper.
 import os
 import sys
 import subprocess
+import time
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def run_script(cmd_list):
     try:
-        # Avvia lo script come sottoprocesso mantenendo il terminale interattivo
         subprocess.run([sys.executable] + cmd_list)
     except Exception as e:
         print(f"\n[ERROR] Impossibile avviare lo script: {e}")
@@ -23,69 +17,66 @@ def run_script(cmd_list):
 def main():
     while True:
         clear_screen()
-        print("=" * 70)
+        print("=" * 75)
         print("       DASHBOARD DI VALIDAZIONE PROGETTO: GESTIONE OCCLUSIONI")
-        print("=" * 70)
+        print("=" * 75)
         print(" Seleziona lo strumento di verifica da eseguire:")
-        print(" " + "-" * 66)
-        print("  1. Visualizzatore Geometrico delle Occlusioni BEV")
-        print("     (Mostra le zone d'ombra LiDAR classificate in 2D)")
+        print(" " + "-" * 71)
+        print("  1. Visualizzatore Interattivo Agente Bayesiano (Prior Condizionate CSV)")
+        print("     (Mostra a schermo la mappa nuScenes nativa, sub-zone e probabilità)")
         print("")
-        print("  2. Test di Integrità Geometrico Automatico")
-        print("     (Analisi di parsing, auto-intersezioni e sovrapposizioni errate)")
+        print("  2. Visualizzatore Interattivo Agente Per-Zone (CNN + 9 Scalari)")
+        print("     (Mostra a schermo le stime probabilistiche del modello PerZoneModel)")
         print("")
-        print("  3. Validazione degli Hit Reali / Near-Miss (Ground Truth)")
-        print("     (Mostra le situazioni reali in cui un oggetto era vicino all'ombra)")
+        print("  3. Valutazione Metriche Ground Truth (Recall, Precision, F1-Score, IoU)")
+        print("     (Valuta le predizioni rispetto agli ostacoli reali nuScenes 3D GT)")
         print("")
-        print("  4. Agente Bayesiano a Runtime")
-        print("     (Visualizza le stime Bayes + Rischio Temporale stocastico)")
+        print("  4. Esegui Calcolo Probabilità Condizionate Bayesiane (Tutti i frame)")
+        print("     (Rigenera i file JSON probabilistici dell'Agente Bayesiano)")
         print("")
-        print("  5. Agente Neurale a Runtime")
-        print("     (Visualizza le stime multi-classe predette dalla UNet PyTorch)")
+        print("  5. Esegui Inferenza Agente Per-Zone su Tutti i Frame")
+        print("     (Rigenera i file JSON probabilistici della rete PerZoneModel)")
         print("")
-        print("  6. Confronto Sincronizzato Affiancato (Bayes vs UNet)")
-        print("     (La visualizzazione comparativa con calcolo dei Delta a terminale)")
+        print("  6. Visualizzatore Comparativo Affiancato (Bayes vs Per-Zone HUD)")
+        print("     (Confronta le due mappe contemporaneamente a schermo)")
         print("")
-        print("  7. Visualizza Report Storico Cumulativo (CSV in Browser)")
-        print("     (Apre un'interfaccia web interattiva con ricerca e ordinamento)")
-        print(" " + "-" * 66)
+        print("  7. 📊 Menu Interattivo Valutazione e Confronto 2 Modelli (Score e Delta)")
+        print(" " + "-" * 71)
         print("  8. Esci")
-        print("=" * 70)
+        print("=" * 75)
         
         choice = input(" Inserisci la tua scelta [1-8]: ").strip()
         
         if choice == '1':
-            print("\nAvvio Visualizzatore Geometrico...")
-            run_script([os.path.join("visualizzatori", "verify_geometry_pipeline.py"), "--mode", "visual"])
-        elif choice == '2':
-            print("\nAvvio Test di Integrità...")
-            run_script([os.path.join("visualizzatori", "verify_geometry_pipeline.py"), "--mode", "check"])
-            input("\nPremi INVIO per tornare al menu...")
-        elif choice == '3':
-            print("\nAvvio Validazione Hit Reali...")
-            run_script([os.path.join("visualizzatori", "verify_bayesian_pipeline.py")])
-        elif choice == '4':
-            print("\nAvvio Agente Bayesiano...")
+            print("\nAvvio Visualizzatore Interattivo Bayesiano...")
             run_script([os.path.join("visualizzatori", "verify_runtime_bayes.py")])
+        elif choice == '2':
+            print("\nAvvio Visualizzatore Interattivo Agente Per-Zone...")
+            run_script([os.path.join("visualizzatori", "verify_runtime_per_zone.py")])
+        elif choice == '3':
+            print("\nAvvio Valutazione Metriche Ground Truth...")
+            run_script(["evaluate_focal_comparison.py"])
+            input("\nPremi INVIO per tornare al menu...")
+        elif choice == '4':
+            print("\nAvvio Calcolo Probabilità Condizionate Bayesiane...")
+            run_script(["conditional_probability_dataset.py"])
+            input("\nPremi INVIO per tornare al menu...")
         elif choice == '5':
-            print("\nAvvio Agente Neurale...")
-            run_script([os.path.join("visualizzatori", "verify_runtime_neural.py")])
+            print("\nAvvio Inferenza Agente Per-Zone su tutti i frame...")
+            run_script(["per_zone_occlusion_agent.py"])
+            input("\nPremi INVIO per tornare al menu...")
         elif choice == '6':
-            print("\nAvvio Confronto Sincronizzato...")
+            print("\nAvvio Visualizzatore Comparativo Affiancato...")
             run_script([os.path.join("visualizzatori", "verify_runtime_comparison.py")])
         elif choice == '7':
-            print("\nApertura Report Storico nel browser...")
-            run_script([os.path.join("visualizzatori", "apri_storico.py")])
-            import time
-            time.sleep(1.0)
+            print("\nAvvio Menu Interattivo di Valutazione e Confronto...")
+            run_script([os.path.join("visualizzatori", "menu_evaluator.py")])
         elif choice == '8':
-            print("\nChiusura della dashboard.")
-            break
+            print("\nUscita dalla Dashboard. Arrivederci!\n")
+            sys.exit(0)
         else:
             print("\n[WARNING] Scelta non valida! Inserisci un numero da 1 a 8.")
-            time_sleep = 1.5
-            import time
-            time.sleep(time_sleep)
+            time.sleep(1.5)
 
 if __name__ == "__main__":
     main()

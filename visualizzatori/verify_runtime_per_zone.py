@@ -1,5 +1,5 @@
-# Macro-Area 3A: Esecuzione e Visualizzazione dell'Agente Bayesiano a Runtime.
-# Visualizzatore Interattivo Semplificato per Agente Bayesiano (Mappa Nativa nuScenes + Ombre + Probabilità)
+# Macro-Area 3B: Esecuzione e Visualizzazione dell'Agente Per-Zone a Runtime.
+# Visualizzatore Interattivo Semplificato per Agente Per-Zone (Mappa Nativa nuScenes + Ombre + Probabilità)
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -13,15 +13,14 @@ from shapely.geometry import Polygon as ShapelyPolygon, Point as ShapelyPoint
 from nuscenes.nuscenes import NuScenes
 from pyquaternion import Quaternion
 
-class RuntimeBayesVisualizer:
-    def __init__(self, in_dir=None):
-        if in_dir is None:
-            self.in_dir = "extracted_occlusions_probabilities"
-            self.modo_label = "UNIFICATO"
-        else:
-            self.in_dir = in_dir
-            self.modo_label = "PERSONALIZZATO"
-            
+class PerZoneRuntimeVisualizer:
+    def __init__(self, mode="per_zone"):
+        self.modo_label = "NEURALE PER-ZONE (Patch 64x64 + Scalari)"
+        self.in_dir = "extracted_occlusions_per_zone"
+        if not os.path.exists(self.in_dir) or not glob.glob(os.path.join(self.in_dir, "*.json")):
+            self.in_dir = "extracted_occlusions_neural"
+            self.modo_label = "NEURALE UNET 2D (Fallback)"
+
         print(f"\nCaricamento dati in modalità: {self.modo_label}")
         print("Inizializzazione NuScenes...")
         self.nusc = NuScenes(version='v1.0-mini', dataroot='./nuscenes', verbose=False)
@@ -49,7 +48,7 @@ class RuntimeBayesVisualizer:
         self.fig.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
         
         print("\n" + "=" * 50)
-        print("    CONTROLLI INTERATTIVI REGISTRATI (BAYES)")
+        print("    CONTROLLI INTERATTIVI REGISTRATI (PER-ZONE)")
         print("=" * 50)
         print(" -> MOUSE            : Passa sopra un'ombra per evidenziarla")
         print(" -> FRECCIA SU/GIÙ   : Cambia frame")
@@ -113,27 +112,14 @@ class RuntimeBayesVisualizer:
             if idx == self.current_occ_idx:
                 continue
             poly_pts = np.array(occ.get('polygon_points_m', []))
-            if len(poly_pts) > 0:
+            if len(poly_pts) >= 3:
                 poly_closed = np.vstack([poly_pts, poly_pts[0]])
                 poly_ego = self.lidar_to_ego(poly_closed)
-                self.ax.plot(poly_ego[:, 0], poly_ego[:, 1], color='#2C374E', linewidth=1.0, alpha=0.5, zorder=4)
-                self.ax.fill(poly_ego[:, 0], poly_ego[:, 1], color='#1E293B', alpha=0.15, zorder=4)
+                self.ax.fill(poly_ego[:, 0], poly_ego[:, 1], color='#0A2540', alpha=0.45, zorder=4)
+                self.ax.plot(poly_ego[:, 0], poly_ego[:, 1], color='#00E5FF', linewidth=0.8, alpha=0.6, zorder=4)
                 
-        # 3. Dati dell'occlusione selezionata
-        occ = self.occlusions[self.current_occ_idx]
-        poly = np.array(occ.get('polygon_points_m', []))
-        name = occ.get('object_name', 'unknown')
-        dist = occ.get('distance_m', 0.0)
-        
-        bayes_probs = occ.get('estimated_probabilities', {})
-        max_b_val = max(bayes_probs.values()) if bayes_probs else 0.0
-        
-        if max_b_val < 0.20:
-            color = "#00E676"  # Verde Neon
-        elif max_b_val < 0.50:
-            color = "#FFD600"  # Giallo Neon
-        else:
-            color = "#FF1744"  # Rosso Neon
+                cx, cy = np.mean(poly_ego[:, 0]), np.mean(poly_ego[:, 1])
+                self.ax.text(cx, cy, f"#{idx+1}", color='#64748B', fontsize=6, ha='center', va='center', zorder=5)
 
         SURF_COLORS = {
             "driveable_surface": ("#607D8B", "#37474F"),
@@ -150,15 +136,18 @@ class RuntimeBayesVisualizer:
             "terrain": "Terreno"
         }
 
-        sub_zones = occ.get('sub_zones', [])
+        curr_occ = self.occlusions[self.current_occ_idx]
+        curr_poly_pts = np.array(curr_occ.get('polygon_points_m', []))
+        sub_zones = curr_occ.get('sub_zones', [])
         
-        # Disegna outline dell'occlusione selezionata in Ego Frame
-        if len(poly) > 0:
-            poly_closed = np.vstack([poly, poly[0]])
+        # 3. Disegno dell'occlusione selezionata
+        if len(curr_poly_pts) >= 3:
+            poly_closed = np.vstack([curr_poly_pts, curr_poly_pts[0]])
             poly_ego = self.lidar_to_ego(poly_closed)
-            self.ax.plot(poly_ego[:, 0], poly_ego[:, 1], color=color, linewidth=2.5, zorder=5, alpha=0.6)
-        
-        # Disegna le sub-zone con colori distinti in Ego Frame
+            self.ax.fill(poly_ego[:, 0], poly_ego[:, 1], color='#8B0000', alpha=0.50, zorder=5)
+            self.ax.plot(poly_ego[:, 0], poly_ego[:, 1], color='#FF0055', linewidth=2.2, zorder=5)
+            
+        # 4. Disegna le sotto-zone con i loro colori specifici sulla mappa BEV
         for sz in sub_zones:
             surf = sz.get('surface', 'terrain')
             fill_c, border_c = SURF_COLORS.get(surf, ("#555", "#333"))
@@ -166,97 +155,91 @@ class RuntimeBayesVisualizer:
             if len(sz_pts) >= 3:
                 sz_closed = np.vstack([sz_pts, sz_pts[0]])
                 sz_ego = self.lidar_to_ego(sz_closed)
-                self.ax.fill(sz_ego[:, 0], sz_ego[:, 1], color=fill_c, alpha=0.45, zorder=5)
-                self.ax.plot(sz_ego[:, 0], sz_ego[:, 1], color=border_c, linewidth=1.5, zorder=5)
+                self.ax.fill(sz_ego[:, 0], sz_ego[:, 1], color=fill_c, alpha=0.55, zorder=6)
+                self.ax.plot(sz_ego[:, 0], sz_ego[:, 1], color=border_c, linewidth=1.5, zorder=6)
                 cx = float(np.mean(sz_ego[:, 0]))
                 cy = float(np.mean(sz_ego[:, 1]))
                 frac_lbl = min(sz.get('area_fraction', 0.0), 1.0) * 100
-                self.ax.text(cx, cy,
-                    f"{SURF_LABELS.get(surf, surf)}: {frac_lbl:.0f}%",
-                    color='white', fontsize=7.0, ha='center', va='center',
-                    bbox=dict(facecolor=fill_c, alpha=0.75, edgecolor=border_c, boxstyle='round,pad=0.3'),
-                    zorder=9)
+                self.ax.text(cx, cy, f"{SURF_LABELS.get(surf, surf)}: {frac_lbl:.0f}%",
+                             color='white', fontsize=7.0, fontweight='bold', ha='center', va='center',
+                             bbox=dict(facecolor=fill_c, alpha=0.85, edgecolor=border_c, boxstyle='round,pad=0.3'),
+                             zorder=7)
+            
+        if len(curr_poly_pts) >= 3:
+            poly_ego = self.lidar_to_ego(curr_poly_pts)
+            cx, cy = np.mean(poly_ego[:, 0]), np.mean(poly_ego[:, 1])
+            self.ax.text(cx, cy, f"#{self.current_occ_idx+1}", color='#FFFFFF', fontsize=9, fontweight='bold', ha='center', va='center', zorder=8)
+
+        total_files = len(self.json_files)
+        ckpt_used = self.data.get("model_checkpoint_used", "N/A")
+        title_text = f"FRAME [{self.current_file_idx + 1}/{total_files}]: {json_filename}\nMODELLAZIONE PER-ZONE (Checkpoint Loss: {ckpt_used})"
+        self.ax.set_title(title_text, color='#66FCF1', fontsize=11, fontweight='bold', pad=12)
 
         # --- Pannello HUD Sinistra ---
-        curr_occ = self.occlusions[self.current_occ_idx]
         dist = curr_occ.get('distance_m', 0.0)
         area = curr_occ.get('area_sqm', 0.0)
         terrain_str = curr_occ.get('terrain_type', 'Sconosciuto')
         sub_distrib = curr_occ.get('subzone_distribution', {})
+        per_zone_probs = curr_occ.get('estimated_probabilities', {})
         
-        bayes_lines = []
-        bayes_lines.append(f"=== OCCLUSION #{self.current_occ_idx+1}/{len(self.occlusions)} ===")
-        bayes_lines.append(f"Distanza: {dist:.1f} m | Area: {area:.1f} m²")
-        bayes_lines.append(f"Terreno : {terrain_str}")
-        bayes_lines.append("-" * 30)
+        hud_lines = []
+        hud_lines.append(f"=== OCCLUSION #{self.current_occ_idx+1}/{len(self.occlusions)} ===")
+        hud_lines.append(f"Distanza: {dist:.1f} m | Area: {area:.1f} m²")
+        hud_lines.append(f"Terreno : {terrain_str}")
+        hud_lines.append("-" * 30)
         
         for k_surf, v_pct in sub_distrib.items():
-            bayes_lines.append(f"{SURF_LABELS.get(k_surf, k_surf):<16}: {v_pct*100:>5.1f}%")
+            hud_lines.append(f"{SURF_LABELS.get(k_surf, k_surf):<16}: {v_pct*100:>5.1f}%")
             
-        bayes_lines.append("=" * 30)
-        bayes_lines.append("PROB GLOBALI (Agente Bayesiano)")
-        bayes_lines.append("-" * 30)
+        hud_lines.append("=" * 30)
+        hud_lines.append("PROB GLOBALI (Rete Per-Zone)")
+        hud_lines.append("-" * 30)
         
         main_cats = ["Auto", "Pedone", "Camion", "Bicicletta"]
         for k in main_cats:
-            v = bayes_probs.get(k, 0.0)
+            v = per_zone_probs.get(k, 0.0)
             bar = self.get_unicode_bar(v)
-            bayes_lines.append(f"{k:<11}: {bar} {v*100:>5.1f}%")
+            hud_lines.append(f"{k:<11}: {bar} {v*100:>5.1f}%")
             
         sec_cats = ["Moto", "Bus", "Rimorchio", "Barriera", "Cono", "Altro"]
         for k in sec_cats:
-            v = bayes_probs.get(k, 0.0)
+            v = per_zone_probs.get(k, 0.0)
             if v > 0.005:
                 bar = self.get_unicode_bar(v)
-                bayes_lines.append(f"{k:<11}: {bar} {v*100:>5.1f}%")
+                hud_lines.append(f"{k:<11}: {bar} {v*100:>5.1f}%")
                 
-        best_cat = max(bayes_probs, key=bayes_probs.get) if bayes_probs else "N/A"
-        best_prob = bayes_probs[best_cat] if bayes_probs else 0.0
+        best_cat = max(per_zone_probs, key=per_zone_probs.get) if per_zone_probs else "N/A"
+        best_prob = per_zone_probs[best_cat] if per_zone_probs else 0.0
         
-        if best_prob >= 0.90:
-            sintesi_hud = f"SINTESI: {best_cat} ({best_prob*100:.0f}%) via Memoria Storica."
-        elif best_prob >= 0.20:
-            sintesi_hud = f"SINTESI: {best_cat} ({best_prob*100:.0f}%) via Semantica HD."
-        else:
-            sintesi_hud = f"SINTESI: Libera ({best_cat} {best_prob*100:.0f}%)."
-            
-        bayes_lines.append("-" * 30)
-        bayes_lines.append(sintesi_hud)
+        hud_lines.append("-" * 30)
+        hud_lines.append(f"SINTESI: {best_cat} ({best_prob*100:.0f}%) via Per-Zone CNN.")
 
         if sub_zones:
-            bayes_lines.append("=" * 30)
-            bayes_lines.append(" PROB PER SUB-ZONA")
+            hud_lines.append("=" * 30)
+            hud_lines.append(" PROB PER SUB-ZONA")
             for sz in sub_zones:
                 surf = sz.get('surface', '?')
                 sz_probs = sz.get('estimated_probabilities', {})
                 frac = min(sz.get('area_fraction', 0.0), 1.0)
                 w = sz.get('occlusion_width_m', 0.0)
-                bayes_lines.append(f"--- {SURF_LABELS.get(surf, surf)} ({frac*100:.0f}% area, W={w:.1f}m) ---")
+                hud_lines.append(f"--- {SURF_LABELS.get(surf, surf)} ({frac*100:.0f}% area, W={w:.1f}m) ---")
                 
                 for k in ["Auto", "Pedone", "Camion", "Bicicletta"]:
                     v = sz_probs.get(k, 0.0)
                     bar = self.get_unicode_bar(v)
-                    bayes_lines.append(f"  {k:<9}: {bar} {v*100:>5.1f}%")
+                    hud_lines.append(f"  {k:<9}: {bar} {v*100:>5.1f}%")
 
-        bayes_box_str = "\n".join(bayes_lines)
-        
-        title_text = (
-            f"AGENTE BAYESIANO DINAMICO ({self.modo_label}) - RISULTATI STIMATI\n"
-            f"FILE: {json_filename} [{self.current_file_idx+1}/{len(self.json_files)}] | "
-            f"Sorgente: {name.split('.')[-1].upper()} ({dist:.1f}m)"
-        )
-        self.ax.set_title(title_text, color='white', fontsize=10, fontweight='bold', pad=15)
+        hud_box_str = "\n".join(hud_lines)
         
         self.ax_hud.text(
-            0.05, 0.95, bayes_box_str, color='white', fontsize=7.5, family='monospace',
-            bbox=dict(facecolor='#1E293B', alpha=0.90, edgecolor=color, boxstyle='round,pad=0.8'),
+            0.05, 0.95, hud_box_str, color='white', fontsize=7.5, family='monospace',
+            bbox=dict(facecolor='#1E293B', alpha=0.90, edgecolor='#00E5FF', boxstyle='round,pad=0.8'),
             va='top', ha='left', transform=self.ax_hud.transAxes
         )
         
         legend_elements = [
-            Patch(facecolor='#00E676', edgecolor='#00E676', alpha=0.6, label='Rischio Basso (<20%)'),
-            Patch(facecolor='#FFD600', edgecolor='#FFD600', alpha=0.6, label='Rischio Medio (20-50%)'),
-            Patch(facecolor='#FF1744', edgecolor='#FF1744', alpha=0.6, label='Rischio Alto (>=50%)'),
+            Patch(facecolor='#8B0000', edgecolor='#FF0055', alpha=0.5, label='Occlusione Selezionata'),
+            Patch(facecolor='#0A2540', edgecolor='#00E5FF', alpha=0.4, label='Altre Occlusioni'),
             Patch(facecolor='#607D8B', edgecolor='#37474F', alpha=0.6, label='Sub-zona Strada'),
             Patch(facecolor='#8D6E63', edgecolor='#5D4037', alpha=0.6, label='Sub-zona Marciapiede'),
             Patch(facecolor='#7B1FA2', edgecolor='#4A148C', alpha=0.6, label='Sub-zona Parcheggio'),
@@ -313,4 +296,4 @@ class RuntimeBayesVisualizer:
                     break
 
 if __name__ == "__main__":
-    RuntimeBayesVisualizer()
+    PerZoneRuntimeVisualizer()
