@@ -11,9 +11,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from per_zone_model import PerZoneModel
-from dataset_generator_per_zone import OcclusionDatasetPerZone
-from loss_functions import WeightedBCESemanticLoss
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from architettura_neurale.per_zone_model import PerZoneModel
+from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetPerZone
+from architettura_neurale.loss_functions import WeightedBCESemanticLoss
 
 def train_per_zone_model(epochs=10, batch_size=32, lr=1e-3, checkpoint_path=os.path.join("pesi_modelli", "per_zone_checkpoint.pth")):
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)

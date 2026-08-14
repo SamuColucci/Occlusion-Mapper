@@ -88,22 +88,12 @@ class WeightedBCESemanticLoss_penalizzazione_zona_semantica(nn.Module):
 
 class FocalLoss(nn.Module):
     """
-    Focal Loss Standard per bilanciare lo sbilanciamento delle classi.
-    
-    1. SMORZA (Loss bassa):
-       - Ombre sottili/piccole da pali della luce, cartelli stradali, semafori o paletti.
-       - Ombre da chiome di alberi o muretti fissi su vegetazione/marciapiedi vuoti.
-       - Ombre di sfondo in parcheggi deserto o l'ombra del veicolo ego stesso.
-    
-    2. FOCALIZZA (Loss alta):
-       - Ombre dietro Autobus, Camion o Furgoni fermi in carreggiata (ingombro cieco).
-       - Ombre in prossimità di Strisce Pedonali ed Incroci Urbani ad alto rischio.
-       - Ombre a cavallo tra Corsia Ciclabile e Strada (possibili Moto/Bici in sorpasso).
+    Focal Loss Standard bilanciata con pesi per le classi positive.
     """
-    def __init__(self, alpha=0.75, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=0.75, gamma=2.0, pos_weights=[2.0, 3.0, 3.0, 3.0, 3.0, 2.0], reduction='mean'):
         super(FocalLoss, self).__init__()
-        self.alpha = alpha
         self.gamma = gamma
+        self.pos_weights = pos_weights
         self.reduction = reduction
 
     def forward(self, logits, targets, scalars=None):
@@ -111,8 +101,10 @@ class FocalLoss(nn.Module):
         bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
         p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
         focal_weight = (1.0 - p_t) ** self.gamma
-        alpha_factor = targets * self.alpha + (1.0 - targets) * (1.0 - self.alpha)
-        loss = alpha_factor * focal_weight * bce_loss
+        
+        pos_w = torch.tensor(self.pos_weights, device=logits.device)
+        weights_matrix = torch.ones_like(targets) + targets * (pos_w - 1.0)
+        loss = weights_matrix * focal_weight * bce_loss
         
         if self.reduction == 'mean':
             return loss.mean()
@@ -123,30 +115,24 @@ class FocalLoss(nn.Module):
 
 class FocalLoss_penalizzazione_zona_semantica(nn.Module):
     """
-    Variante Focal Loss con Penalizzazione Zona Semantica Estesa:
-    Combina la Focal Loss dinamica (gamma=2.0) con la penalizzazione bilanciata dei veicoli su Marciapiede e Terreno (moltiplicatore 1.5).
-    Inibisce i falsi allarmi di veicoli a motore su zone non carrabili garantendo il 99.0% di Coerenza Semantica Spaziale.
+    Focal Loss con Penalizzazione Zona Semantica:
+    Inibisce i veicoli su marciapiede/terreno con peso bilanciato 0.5 per preservare la Recall.
     """
     def __init__(self, alpha=0.75, gamma=2.0):
         super(FocalLoss_penalizzazione_zona_semantica, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
+        self.focal = FocalLoss(gamma=gamma)
 
     def forward(self, logits, targets, scalars=None):
-        probs = torch.sigmoid(logits)
-        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-        p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
-        focal_weight = (1.0 - p_t) ** self.gamma
-        alpha_factor = targets * self.alpha + (1.0 - targets) * (1.0 - self.alpha)
-        loss = alpha_factor * focal_weight * bce_loss
-        base_focal = loss.mean()
+        base_focal = self.focal(logits, targets)
         
         if scalars is not None and scalars.shape[1] >= 9:
+            probs = torch.sigmoid(logits)
             t_flag = scalars[:, 8:9]  # Terreno Fuoristrada
             s_flag = scalars[:, 5:6]  # Marciapiede
             non_driveable_flag = torch.clamp(t_flag + s_flag, 0.0, 1.0)
-            # Penalità bilanciata (1.5) per inibire i veicoli su marciapiede/terreno senza distruggere la Recall
-            vehicle_penalty = non_driveable_flag * (1.0 - targets[:, [0, 1, 3]]) * probs[:, [0, 1, 3]] * 1.5
+            
+            # Penalità mitigata a 0.5 per realismo ed evitare la sovra-soppressione dei veicoli
+            vehicle_penalty = non_driveable_flag * (1.0 - targets[:, [0, 1, 3]]) * probs[:, [0, 1, 3]] * 0.5
             return base_focal + vehicle_penalty.mean()
             
         return base_focal
@@ -154,33 +140,34 @@ class FocalLoss_penalizzazione_zona_semantica(nn.Module):
 
 class AsymmetricLoss(nn.Module):
     """
-    Asymmetric Loss (ASL - Ridnik et al., IEEE/CVF CVPR 2021)
-    Progettata per classificazione Multi-Label ad elevatissimo sbilanciamento.
-    Applica focalizzazione asimmetrica gamma_+ (1.0) e gamma_- (4.0) con Probability Margin Shift (m = 0.05).
+    Asymmetric Loss (ASL) bilanciata con pesi per le classi positive.
     """
-    def __init__(self, gamma_neg=4.0, gamma_pos=1.0, clip=0.05, eps=1e-8):
+    def __init__(self, gamma_neg=4.0, gamma_pos=1.0, clip=0.05, pos_weights=[2.0, 3.0, 3.0, 3.0, 3.0, 2.0], eps=1e-8):
         super(AsymmetricLoss, self).__init__()
         self.gamma_neg = gamma_neg
         self.gamma_pos = gamma_pos
         self.clip = clip
+        self.pos_weights = pos_weights
         self.eps = eps
 
     def forward(self, logits, targets, scalars=None):
         probs = torch.sigmoid(logits)
         targets = targets.type_as(logits)
 
-        # 1. Componente Positiva (y = 1)
+        # 1. Componente Positiva (y = 1) con pesi pos_weights
         probs_pos = probs
         targets_pos = targets
         loss_pos = targets_pos * torch.log(torch.clamp(probs_pos, min=self.eps))
         if self.gamma_pos > 0:
             loss_pos *= (1.0 - probs_pos) ** self.gamma_pos
+            
+        pos_w = torch.tensor(self.pos_weights, device=logits.device)
+        loss_pos = loss_pos * pos_w
 
         # 2. Componente Negativa (y = 0) con Margin Shift (clip = 0.05)
         probs_neg = 1.0 - probs
         targets_neg = 1.0 - targets
         
-        # Asymmetric Margin Shift: p_m = max(p - m, 0)
         if self.clip is not None and self.clip > 0:
             probs_neg = torch.clamp(probs_neg + self.clip, max=1.0)
 
@@ -194,8 +181,8 @@ class AsymmetricLoss(nn.Module):
 
 class AsymmetricLoss_penalizzazione_zona_semantica(nn.Module):
     """
-    Asymmetric Loss (ASL - Ridnik et al., CVPR 2021) integrata con Penalizzazione Zona Semantica:
-    Combina il Margin Shift asimmetrico (gamma_neg=4.0, clip=0.05) con la penalizzazione dei veicoli su Marciapiede/Terreno (1.5).
+    ASL con Penalizzazione Zona Semantica:
+    Inibisce i veicoli su marciapiede/terreno con peso bilanciato 0.5 per preservare la Recall.
     """
     def __init__(self, gamma_neg=4.0, gamma_pos=1.0, clip=0.05, eps=1e-8):
         super(AsymmetricLoss_penalizzazione_zona_semantica, self).__init__()
@@ -208,8 +195,72 @@ class AsymmetricLoss_penalizzazione_zona_semantica(nn.Module):
             t_flag = scalars[:, 8:9]  # Terreno Fuoristrada
             s_flag = scalars[:, 5:6]  # Marciapiede
             non_driveable_flag = torch.clamp(t_flag + s_flag, 0.0, 1.0)
-            vehicle_penalty = non_driveable_flag * (1.0 - targets[:, [0, 1, 3]]) * probs[:, [0, 1, 3]] * 1.5
+            
+            # Penalità mitigata a 0.5 per evitare la sovra-soppressione dei veicoli
+            vehicle_penalty = non_driveable_flag * (1.0 - targets[:, [0, 1, 3]]) * probs[:, [0, 1, 3]] * 0.5
             return base_asl + vehicle_penalty.mean()
+            
+        return base_asl
+
+
+class FocalLoss_neurosimbolica_completa(nn.Module):
+    """
+    Focal Loss Neurosimbolica Completa:
+    Inibisce i veicoli su aree non carrabili (0.5) e promuove VRU su aree pedonali (3.0).
+    """
+    def __init__(self, alpha=0.75, gamma=2.0):
+        super(FocalLoss_neurosimbolica_completa, self).__init__()
+        self.focal = FocalLoss(gamma=gamma)
+
+    def forward(self, logits, targets, scalars=None):
+        base_focal = self.focal(logits, targets)
+        
+        if scalars is not None and scalars.shape[1] >= 9:
+            probs = torch.sigmoid(logits)
+            t_flag = scalars[:, 8:9]  # Terreno Fuoristrada
+            s_flag = scalars[:, 5:6]  # Marciapiede
+            c_flag = scalars[:, 6:7]  # Strisce
+            
+            # 1. Inibizione Veicoli (Auto, Camion, Moto) - Peso mitigato a 0.5
+            non_driveable_flag = torch.clamp(t_flag + s_flag, 0.0, 1.0)
+            vehicle_penalty = non_driveable_flag * (1.0 - targets[:, [0, 1, 3]]) * probs[:, [0, 1, 3]] * 0.5
+            
+            # 2. Promozione Pedoni e Biciclette (VRU)
+            walkway_flag = torch.clamp(s_flag + c_flag + t_flag, 0.0, 1.0)
+            ped_bici_boost = walkway_flag * targets[:, [2, 4]] * (1.0 - probs[:, [2, 4]]) * 3.0
+            
+            return base_focal + vehicle_penalty.mean() + ped_bici_boost.mean()
+            
+        return base_focal
+
+
+class AsymmetricLoss_neurosimbolica_completa(nn.Module):
+    """
+    ASL Neurosimbolica Completa:
+    Inibisce i veicoli su aree non carrabili (0.5) e promuove VRU su aree pedonali (3.0).
+    """
+    def __init__(self, gamma_neg=4.0, gamma_pos=1.0, clip=0.05, eps=1e-8):
+        super(AsymmetricLoss_neurosimbolica_completa, self).__init__()
+        self.asl = AsymmetricLoss(gamma_neg=gamma_neg, gamma_pos=gamma_pos, clip=clip, eps=eps)
+
+    def forward(self, logits, targets, scalars=None):
+        base_asl = self.asl(logits, targets)
+        
+        if scalars is not None and scalars.shape[1] >= 9:
+            probs = torch.sigmoid(logits)
+            t_flag = scalars[:, 8:9]  # Terreno Fuoristrada
+            s_flag = scalars[:, 5:6]  # Marciapiede
+            c_flag = scalars[:, 6:7]  # Strisce
+            
+            # 1. Inibizione Veicoli (Auto, Camion, Moto) - Peso mitigato a 0.5
+            non_driveable_flag = torch.clamp(t_flag + s_flag, 0.0, 1.0)
+            vehicle_penalty = non_driveable_flag * (1.0 - targets[:, [0, 1, 3]]) * probs[:, [0, 1, 3]] * 0.5
+            
+            # 2. Promozione Pedoni e Biciclette (VRU)
+            walkway_flag = torch.clamp(s_flag + c_flag + t_flag, 0.0, 1.0)
+            ped_bici_boost = walkway_flag * targets[:, [2, 4]] * (1.0 - probs[:, [2, 4]]) * 3.0
+            
+            return base_asl + vehicle_penalty.mean() + ped_bici_boost.mean()
             
         return base_asl
 

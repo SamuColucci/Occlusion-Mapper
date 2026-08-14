@@ -94,12 +94,12 @@ class PerZoneRuntimeVisualizer:
         
         json_filename = os.path.basename(self.json_files[self.current_file_idx])
         
-        # 1. RENDER NATIVO UFFICIALE NUSCENES (Strada HD, 3D Boxes, LiDAR)
+        # 1. RENDER NATIVO UFFICIALE NUSCENES (Strada HD Map, 3D Boxes, LiDAR PointCloud)
         if self.lidar_token:
             try:
-                self.nusc.render_sample_data(self.lidar_token, ax=self.ax, verbose=False)
-            except Exception:
-                pass
+                self.nusc.render_sample_data(self.lidar_token, ax=self.ax, underlay_map=True, verbose=False)
+            except Exception as e:
+                print(f"[WARN] Impossibile renderizzare il background nuScenes: {e}")
                 
         if not self.occlusions:
             self.ax.set_title(f"FILE: {json_filename}\nNessuna occlusione registrata.", color='white')

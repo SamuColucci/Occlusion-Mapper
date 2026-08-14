@@ -7,10 +7,10 @@ import torch
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from per_zone_model import PerZoneModel
-from dataset_generator_per_zone import OcclusionDatasetPerZone
-from ground_truth_extractor import get_occlusion_ground_truth_target
-from ground_truth_extractor_synthetic import generate_synthetic_injected_gt
+from architettura_neurale.per_zone_model import PerZoneModel
+from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetPerZone
+from ground_truth.ground_truth_extractor import get_occlusion_ground_truth_target
+from ground_truth.ground_truth_extractor_synthetic import generate_synthetic_injected_gt
 
 def run_synthetic_evaluation(threshold=0.30):
     print("\n" + "=" * 95)

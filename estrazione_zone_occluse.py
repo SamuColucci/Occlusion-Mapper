@@ -1,7 +1,9 @@
 import os
+import sys
 import json
-from factory_dataset import create_adapter
-from ray_caster import RayCaster
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dataset_adapter.factory_dataset import create_adapter
+from raycaster.ray_caster import RayCaster
 
 def main():
     # Scelta del dataset

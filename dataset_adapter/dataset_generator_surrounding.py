@@ -10,8 +10,11 @@ import torch
 from torch.utils.data import Dataset
 from shapely.geometry import Polygon as ShapelyPolygon, MultiPolygon as ShapelyMultiPolygon
 
-from dataset_generator_per_zone import OcclusionDatasetNeural, rasterize_polygon, GRID_DIM, GRID_RANGE, VOXEL_SIZE
-from ground_truth_extractor import extract_ground_truth_masks, get_occlusion_ground_truth_target
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetNeural, rasterize_polygon, GRID_DIM, GRID_RANGE, VOXEL_SIZE
+from ground_truth.ground_truth_extractor import extract_ground_truth_masks, get_occlusion_ground_truth_target
 
 def compute_surrounding_ring_scalars(poly_pts, frame_data, buffer_radius_m=2.0):
     """

@@ -6,9 +6,12 @@ import os
 import numpy as np
 import json
 from shapely.geometry import Polygon as ShapelyPolygon, Point as ShapelyPoint
-from factory_dataset import create_adapter
-from ray_caster import RayCaster
-from conditional_probability_occlusion_zone import conditional_probablity_occlusion_zone
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from dataset_adapter.factory_dataset import create_adapter
+from raycaster.ray_caster import RayCaster
+from inferenza_agenti.bayes_zone_calculator import conditional_probablity_occlusion_zone
 
 # Metodo per il mapping tra i nomi delle categorie usati nel dataset e quelli usati nel resto del codice
 def map_category_name(raw_name):

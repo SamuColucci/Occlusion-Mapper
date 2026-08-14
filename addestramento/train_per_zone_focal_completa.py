@@ -1,24 +1,24 @@
-# Script di Addestramento variante Asymmetric Loss (train_per_zone_asl.py)
-# Addestra il modello PerZoneModel utilizzando la Asymmetric Loss (ASL - Ridnik et al., IEEE CVPR 2021) 
-# integrata con la Penalizzazione della Zona Semantica.
-# Salva il checkpoint dei pesi addestrati nel file per_zone_checkpoint_asl.pth
+# Script di Addestramento Focal Loss Neurosimbolica Completa (train_per_zone_focal_completa.py)
+# Addestra il modello PerZoneModel con FocalLoss_neurosimbolica_completa (20 Epoche con Cosine Scheduler)
+# Salva il checkpoint dei pesi addestrati nel file per_zone_checkpoint_focal_completa.pth
 
 import os
 import sys
 import time
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from per_zone_model import PerZoneModel
-from dataset_generator_per_zone import OcclusionDatasetPerZone
-from loss_functions import AsymmetricLoss_penalizzazione_zona_semantica
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-def train_asl_model(epochs=20, batch_size=32, lr=1e-3, checkpoint_path=os.path.join("pesi_modelli", "per_zone_checkpoint_asl.pth")):
+from architettura_neurale.per_zone_model import PerZoneModel
+from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetPerZone
+from architettura_neurale.loss_functions import FocalLoss_neurosimbolica_completa
+
+def train_focal_completa_model(epochs=20, batch_size=32, lr=1e-3, checkpoint_path=os.path.join("pesi_modelli", "per_zone_checkpoint_focal_completa.pth")):
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-    print("\n" + "=" * 80)
-    print("   ADDESTRAMENTO VARIANTE: ASYMMETRIC LOSS (CVPR 2021) + PENALIZZAZIONE SEMANTICA (20 EPOCHE)")
-    print("=" * 80)
+    print("\n" + "=" * 85)
+    print("   ADDESTRAMENTO VARIANTE: FOCAL LOSS NEUROSIMBOLICA COMPLETA (INIBIZIONE + PROMOZIONE VRU - 20 EPOCHE)")
+    print("=" * 85)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Dispositivo di Calcolo Selezionato: {device}")
@@ -29,12 +29,11 @@ def train_asl_model(epochs=20, batch_size=32, lr=1e-3, checkpoint_path=os.path.j
 
     model = PerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(device)
 
-    # Inizializza la Asymmetric Loss con Margin Shift (gamma_neg=4.0, clip=0.05)
-    criterion = AsymmetricLoss_penalizzazione_zona_semantica(gamma_neg=4.0, gamma_pos=1.0, clip=0.05)
+    criterion = FocalLoss_neurosimbolica_completa(alpha=0.75, gamma=2.0)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
-    print(f"\nInizio Addestramento Asymmetric Loss per {epochs} Epoche...\n")
+    print(f"\nInizio Addestramento Focal Loss Completa per {epochs} Epoche...\n")
     start_time = time.time()
     
     model.train()
@@ -58,18 +57,18 @@ def train_asl_model(epochs=20, batch_size=32, lr=1e-3, checkpoint_path=os.path.j
         scheduler.step()
         current_lr = scheduler.get_last_lr()[0]
         avg_loss = epoch_loss / len(dataloader)
-        print(f"  [Epoca {epoch+1:2d}/{epochs:2d}] Loss Media ASL Semantica: {avg_loss:.4f} | LR: {current_lr:.6f}")
+        print(f"  [Epoca {epoch+1:2d}/{epochs:2d}] Loss Media Focal Completa: {avg_loss:.4f} | LR: {current_lr:.6f}")
 
     total_time = time.time() - start_time
-    print(f"\nAddestramento Asymmetric Loss completato in {total_time:.2f} secondi.")
+    print(f"\nAddestramento Focal Loss Completa terminato in {total_time:.2f} secondi.")
 
     torch.save({
         'model_state_dict': model.state_dict(),
         'epochs': epochs,
         'final_loss': avg_loss
     }, checkpoint_path)
-    print(f"Pesi della Variante Asymmetric Loss salvati in: {os.path.abspath(checkpoint_path)}")
-    print("=" * 80 + "\n")
+    print(f"Pesi salvati in: {os.path.abspath(checkpoint_path)}")
+    print("=" * 85 + "\n")
 
 if __name__ == "__main__":
-    train_asl_model(epochs=20, batch_size=32, lr=1e-3)
+    train_focal_completa_model(epochs=20, batch_size=32, lr=1e-3)

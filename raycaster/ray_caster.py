@@ -825,6 +825,11 @@ class RayCaster:
                 sh_poly_simple = sh_poly.simplify(0.2, preserve_topology=True)
                 if not sh_poly_simple.is_valid:
                     sh_poly_simple = sh_poly_simple.buffer(0)
+                
+                # ponytail: se il poligono si è diviso in più parti disgiunte, prendiamo la componente con area maggiore
+                if sh_poly_simple.geom_type == 'MultiPolygon':
+                    sh_poly_simple = max(sh_poly_simple.geoms, key=lambda p: p.area)
+                    
                 polygon_m = [[round(x, 2), round(y, 2)] for x, y in sh_poly_simple.exterior.coords]
                 # Rimuove il punto duplicato finale se presente
                 if len(polygon_m) > 1 and polygon_m[0] == polygon_m[-1]:

@@ -98,12 +98,12 @@ class ComparisonRuntimeVisualizer:
         ax.clear()
         ax.axis('off')
         
-        # 1. RENDER NATIVO OFFICIALE NUSCENES
+        # 1. RENDER NATIVO UFFICIALE NUSCENES (Strada HD Map, 3D Boxes, LiDAR PointCloud)
         if self.lidar_token:
             try:
-                self.nusc.render_sample_data(self.lidar_token, ax=ax, verbose=False)
-            except Exception:
-                pass
+                self.nusc.render_sample_data(self.lidar_token, ax=ax, underlay_map=True, verbose=False)
+            except Exception as e:
+                print(f"[WARN] Impossibile renderizzare il background nuScenes: {e}")
                 
         ax.set_title(title_str, color='#66FCF1', fontsize=11, fontweight='bold', pad=12)
 

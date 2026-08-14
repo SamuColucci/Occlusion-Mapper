@@ -11,9 +11,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from PIL import Image, ImageDraw
-from factory_dataset import create_adapter
-from ground_truth_extractor import extract_ground_truth_masks, rasterize_polygon, get_occlusion_ground_truth_target
+from dataset_adapter.factory_dataset import create_adapter
+from ground_truth.ground_truth_extractor import extract_ground_truth_masks, rasterize_polygon, get_occlusion_ground_truth_target
 
 # Parametri della griglia Bird's Eye View (BEV)
 GRID_DIM = 200

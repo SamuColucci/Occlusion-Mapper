@@ -123,7 +123,7 @@ def get_occlusion_ground_truth_target(target_tensor, poly_pts):
 
 
 if __name__ == "__main__":
-    from factory_dataset import create_adapter
+    from dataset_adapter.factory_dataset import create_adapter
     adapter = create_adapter("nuscenes", "./nuscenes")
     sample_data = adapter.get_sample_data(0)
     gt_masks = extract_ground_truth_masks(sample_data)

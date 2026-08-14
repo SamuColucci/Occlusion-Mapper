@@ -14,11 +14,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import cv2
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.ops import unary_union
-from dataset_generator_per_zone import OcclusionDatasetNeural, rasterize_polygon
-from per_zone_model import PerZoneModel
+from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetNeural, rasterize_polygon
+from architettura_neurale.per_zone_model import PerZoneModel
 
 # Funzione di utilità per fondere le maschere semantiche del terreno (numpy 2D o liste di poligoni) in un unico poligono Shapely (unary_union)
 def _build_union_(layer_masks):

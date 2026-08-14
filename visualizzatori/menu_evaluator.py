@@ -10,8 +10,8 @@ import torch
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from per_zone_model import PerZoneModel
-from dataset_generator_per_zone import OcclusionDatasetPerZone
+from architettura_neurale.per_zone_model import PerZoneModel
+from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetPerZone
 
 MODEL_NAMES = [
     "1. Agente Bayesiano Dinamico (Prior HD)",

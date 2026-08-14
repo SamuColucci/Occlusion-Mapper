@@ -21,9 +21,7 @@ from pyquaternion import Quaternion
 from shapely.geometry import Polygon, MultiPolygon
 
 # Import del pattern Adapter
-from adapter_dataset import AdapterDataset
-# Import della classe LocalBox
-from adapter_dataset import LocalBox
+from dataset_adapter.adapter_dataset import AdapterDataset, LocalBox
 
 # Libreria per la gestione dei dizionari defaultdict
 from collections import defaultdict
@@ -45,6 +43,9 @@ class NuscenesDatasetAdapter(AdapterDataset):
 
     # Metodo per ottenere il numero di campioni del dataset
     def get_num_samples(self) -> int:
+        return len(self.all_samples)
+
+    def __len__(self) -> int:
         return len(self.all_samples)
         
     def get_scene_indices(self) -> dict:
