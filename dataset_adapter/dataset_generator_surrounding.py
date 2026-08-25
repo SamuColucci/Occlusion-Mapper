@@ -1,19 +1,27 @@
-# Generatore di Dataset a Contesto Esterno Anello (dataset_generator_surrounding.py)
+# Generatore di Dataset a Contesto Esterno Anello (dataset_adapter/dataset_generator_surrounding.py)
 # Calcola gli scalari semantici del terreno ESCLUSIVAMENTE sull'anello circostante esterno (Ring Buffer 2.0m)
-# mascherando come ignota la semantica interna al cono d'ombra.
+# mascherando come ignota la semantica interna al cono d'ombra per lo studio di ablazione.
 
+# Import dei moduli di sistema per la gestione dei percorsi di file
 import os
 import sys
+# Import di json per la lettura delle occlusioni estratte
 import json
+# Import di numpy per calcoli algebrici ed operazioni matriciali
 import numpy as np
+# Import di torch per la creazione dei tensori PyTorch
 import torch
 from torch.utils.data import Dataset
+# Import delle primitive geometriche di Shapely per il calcolo delle differenze e buffer
 from shapely.geometry import Polygon as ShapelyPolygon, MultiPolygon as ShapelyMultiPolygon
 
+# Aggiunge la cartella radice del progetto al sys.path per l'importazione dei moduli accessori
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Import dei generatori base e delle costanti della griglia BEV
 from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetNeural, rasterize_polygon, GRID_DIM, GRID_RANGE, VOXEL_SIZE
+# Import delle funzioni per l'estrazione del target di Ground Truth
 from ground_truth.ground_truth_extractor import extract_ground_truth_masks, get_occlusion_ground_truth_target
 
 def compute_surrounding_ring_scalars(poly_pts, frame_data, buffer_radius_m=2.0):
@@ -22,13 +30,16 @@ def compute_surrounding_ring_scalars(poly_pts, frame_data, buffer_radius_m=2.0):
     ESCLUSIVAMENTE sull'anello esterno circostante (buffer di 2.0 metri attorno all'ombra), 
     trattando come ignota la semantica interna.
     """
+    # Inizializza l'array degli 9 scalari con valori a zero
     scalars = np.zeros(9, dtype=np.float32)
+    # Controllo di sicurezza: se il poligono ha meno di 3 vertici validi
     if poly_pts is None or len(poly_pts) < 3:
         return scalars
 
     pts_arr = np.array(poly_pts)
     pts_xy = np.column_stack([pts_arr[:, 1], pts_arr[:, 0]])
     try:
+        # Crea l'oggetto poligono Shapely dell'ombra interna
         poly_inner = ShapelyPolygon(pts_xy)
         if not poly_inner.is_valid:
             poly_inner = poly_inner.buffer(0)
@@ -39,7 +50,7 @@ def compute_surrounding_ring_scalars(poly_pts, frame_data, buffer_radius_m=2.0):
     if occ_area <= 0:
         return scalars
 
-    # 1. Geometria dell'ombra interna
+    # 1. Geometria dell'ombra interna (Area, Distanza dal sensore, Larghezza, Altezza)
     bounds = poly_inner.bounds
     width = float(bounds[2] - bounds[0])
     height = float(bounds[3] - bounds[1])
@@ -52,9 +63,10 @@ def compute_surrounding_ring_scalars(poly_pts, frame_data, buffer_radius_m=2.0):
     scalars[2] = min(width / 15.0, 1.0)
     scalars[3] = min(height / 15.0, 1.0)
 
-    # 2. Generazione dell'Anello Esterno Circostante (Ring Buffer)
+    # 2. Generazione dell'Anello Esterno Circostante (Ring Buffer di 2.0 metri)
     try:
         poly_outer = poly_inner.buffer(buffer_radius_m)
+        # Differenza tra il poligono espanso ed il poligono interno per estrarre l'anello esterno
         ring_poly = poly_outer.difference(poly_inner)
     except Exception:
         ring_poly = poly_inner
@@ -63,7 +75,7 @@ def compute_surrounding_ring_scalars(poly_pts, frame_data, buffer_radius_m=2.0):
     if ring_area <= 0.01:
         return scalars
 
-    # 3. Intersezione della semantica dell'Anello Circostante Esterno
+    # 3. Intersezione della semantica dell'Anello Circostante Esterno con la mappa HD
     semantic_map = frame_data.get("semantic_map", {})
     def get_layer_union(mask_name):
         mask_data = semantic_map.get(mask_name, None)
@@ -97,6 +109,7 @@ def compute_surrounding_ring_scalars(poly_pts, frame_data, buffer_radius_m=2.0):
     for idx, (lname, lpoly) in enumerate(layers.items()):
         if lpoly is not None:
             try:
+                # Calcola l'intersezione tra l'anello circostante ed il livello di terreno HD
                 inter = ring_poly.intersection(lpoly)
                 iarea = float(inter.area)
                 scalars[4 + idx] = min(iarea / ring_area, 1.0)
@@ -104,7 +117,7 @@ def compute_surrounding_ring_scalars(poly_pts, frame_data, buffer_radius_m=2.0):
             except Exception:
                 pass
 
-    # Terreno anello circostante = area anello non coperta da altre superfici
+    # Terreno anello circostante = area dell'anello non coperta da altre superfici di carreggiata
     scalars[8] = min(max(0.0, ring_area - covered_ring_area) / ring_area, 1.0)
     return scalars
 
@@ -118,6 +131,7 @@ class OcclusionDatasetSurrounding(Dataset):
         self.samples = []
         
         print("\nEstrazione dei patch e delle feature basate sull'Anello Semantico Circostante...")
+        # Costruisce la lista di campioni per lo studio di ablazione
         self._build_samples()
         print(f"Dataset Contesto Esterno completato: Estratti {len(self.samples)} coni d'ombra totali.\n")
 
@@ -179,6 +193,7 @@ class OcclusionDatasetSurrounding(Dataset):
         s = self.samples[idx]
         return s['patch'], s['scalars'], s['target']
 
+# Blocco principale di autoverifica (Self-Test) se eseguito direttamente da riga di comando
 if __name__ == "__main__":
     ds = OcclusionDatasetSurrounding()
     print(f"Self-Test Dataset Surrounding OK! Totale campioni: {len(ds)}")

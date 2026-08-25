@@ -2,24 +2,39 @@
 # Mostra contemporaneamente ed in modo interattivo la Ground Truth Reale nuScenes 3D GT 
 # e la Ground Truth Sintetica Inserita (Stress Test ad alta densità con 3.102 ostacoli).
 
+# Import delle librerie di sistema per la manipolazione dei percorsi di ricerca Python
 import sys
 import os
+# Import di glob per reperire l'elenco dei file sul disco
 import glob
+# Import di json per la lettura e deserializzazione dei file di configurazione
 import json
+# Import di numpy per le operazioni di calcolo algebrico ed array multidimensionali
 import numpy as np
+# Import di matplotlib per il rendering delle figure grafiche 2D e delle mappe
 import matplotlib.pyplot as plt
+# Import di Patch e Rectangle da matplotlib per la creazione degli elementi della legenda
 from matplotlib.patches import Patch, Rectangle
+# Import delle primitive geometriche di Shapely per la gestione dei poligoni
 from shapely.geometry import Polygon as ShapelyPolygon
+# Import dell'SDK nuScenes per l'accesso ai sensori ed alle annotazioni 3D
 from nuscenes.nuscenes import NuScenes
+# Import di Quaternion per la gestione delle rotazioni 3D nello spazio
 from pyquaternion import Quaternion
 
+# Aggiunge la directory radice del progetto al sys.path per consentire l'importazione di moduli accessori
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Import dell'adapter di fabbrica per la gestione del dataset nuScenes
 from dataset_adapter.factory_dataset import create_adapter
+# Import delle funzioni di estrazione della Ground Truth reale 3D
 from ground_truth.ground_truth_extractor import extract_ground_truth_masks, get_occlusion_ground_truth_target
+# Import delle funzioni per la generazione della Ground Truth sintetica ad alta densità
 from ground_truth.ground_truth_extractor_synthetic import generate_synthetic_injected_gt, OBSTACLE_SPECS_M
 
+# Nomi descrittivi delle 6 categorie di ostacoli predette dal sistema
 CLASS_NAMES = ["Auto", "Camion/Bus", "Pedone", "Moto", "Bicicletta", "Barriera"]
+# Mappa dei colori esadecimali associati a ciascuna classe di ostacolo per la legenda
 CLASS_COLORS = {
     "Auto": "#3B82F6",       # Blu
     "Camion/Bus": "#EC4899", # Rosa
@@ -29,15 +44,20 @@ CLASS_COLORS = {
     "Barriera": "#64748B"    # Grigio
 }
 
+# Classe principale per la gestione del visualizzatore interattivo a confronto Ground Truth Reale vs Sintetica
 class GroundTruthVisualizer:
     def __init__(self, dataroot="./nuscenes"):
+        # Stampa l'intestazione di avvio del visualizzatore di Ground Truth
         print("\n" + "=" * 70)
         print("   INIZIALIZZAZIONE VISUALIZZATORE GROUND TRUTH (REALE VS SINTETICA)")
         print("=" * 70)
         print("Caricamento dataset nuScenes...")
+        # Istanzia l'adapter per il caricamento dei dati di nuScenes
         self.adapter = create_adapter("nuscenes", dataroot)
         self.nusc = self.adapter.nusc
+        # Recupera il numero totale di campioni presenti nel dataset
         self.total_samples = self.adapter.get_num_samples()
+        # Inizializza l'indice del fotogramma corrente a zero
         self.current_idx = 0
         
         # Configurazione Figure Matplotlib a 2 Pannelli Mappa + 1 HUD
@@ -49,14 +69,18 @@ class GroundTruthVisualizer:
         self.ax_real = self.fig.add_subplot(gs[1])
         self.ax_syn = self.fig.add_subplot(gs[2])
         
+        # Impostazione dei margini per ottimizzare la resa visiva
         self.fig.subplots_adjust(left=0.03, right=0.97, top=0.92, bottom=0.05)
         
+        # Imposta lo sfondo scuro (dark mode) per tutti i tre pannelli
         self.ax_hud.set_facecolor('#0F172A')
         self.ax_real.set_facecolor('#0F172A')
         self.ax_syn.set_facecolor('#0F172A')
         
+        # Collega l'evento di pressione della tastiera alla funzione callback di gestione del movimento
         self.fig.canvas.mpl_connect('key_press_event', self.on_key)
         
+        # Stampa le istruzioni ed i controlli da tastiera per l'utente nel terminale
         print("\n" + "=" * 50)
         print("    CONTROLLI INTERATTIVI REGISTRATI (GROUND TRUTH)")
         print("=" * 50)
@@ -66,26 +90,33 @@ class GroundTruthVisualizer:
         print(" -> TASTO 'Q' / ESC          : Esci dal Visualizzatore")
         print("=" * 50 + "\n")
         
+        # Esegue il primo rendering a schermo e mostra la finestra interattiva
         self.plot_current()
         plt.show()
 
     def on_key(self, event):
+        # Freccia destra o su: passa al fotogramma successivo
         if event.key in ['right', 'up']:
             self.current_idx = (self.current_idx + 1) % self.total_samples
             self.plot_current()
+        # Freccia sinistra o giù: torna al fotogramma precedente
         elif event.key in ['left', 'down']:
             self.current_idx = (self.current_idx - 1) % self.total_samples
             self.plot_current()
+        # Tasto R: rigenera la disposizione sintetica degli ostacoli per lo stress test
         elif event.key in ['r', 'R']:
             self.plot_current()
+        # Tasto Q o ESC: chiude la finestra del visualizzatore
         elif event.key in ['q', 'Q', 'escape']:
             plt.close(self.fig)
 
     def draw_gt_masks(self, ax, gt_masks, title_str, is_synthetic=False):
+        # Pulisce gli elementi grafici del pannello
         ax.clear()
         ax.set_facecolor('#0B0C10')
         ax.axis('off')
         
+        # Parametri della griglia spaziale BEV (200x200 celle di risoluzione 0.4m per coprire 40m di raggio)
         grid_dim = 200
         grid_range = 40.0
         voxel_size = 0.4
@@ -93,28 +124,28 @@ class GroundTruthVisualizer:
         # 1. RENDER HD MAP (Strada, Marciapiede, Strisce, Parcheggi)
         sem_map = self.sample_data.get('semantic_map', {})
         if sem_map:
-            # Mask Drivable Area (Strada)
+            # Maschera della Drivable Area (Carreggiata guidabile)
             if 'drivable_area' in sem_map and np.any(sem_map['drivable_area']):
                 y_s, x_s = np.where(sem_map['drivable_area'])
                 ax.scatter((x_s - 100) * 0.4, (y_s - 100) * 0.4, c='#1E293B', s=2, alpha=0.4, zorder=1)
-            # Mask Walkway (Marciapiede)
+            # Maschera Walkway (Marciapiede)
             if 'walkway' in sem_map and np.any(sem_map['walkway']):
                 y_w, x_w = np.where(sem_map['walkway'])
                 ax.scatter((x_w - 100) * 0.4, (y_w - 100) * 0.4, c='#334155', s=2, alpha=0.5, zorder=2)
-            # Mask Ped Crossing (Strisce)
+            # Maschera Ped Crossing (Strisce pedonali)
             if 'ped_crossing' in sem_map and np.any(sem_map['ped_crossing']):
                 y_p, x_p = np.where(sem_map['ped_crossing'])
-                ax.scatter((x_p - 100) * 0.4, (y_p - 100) * 0.4, c='#0288D1', s=2, alpha=0.6, zorder=2)
+                ax.scatter((x_p - 100) * 0.4, (x_p - 100) * 0.4, c='#0288D1', s=2, alpha=0.6, zorder=2)
 
-        # 2. RENDER LIDAR POINT CLOUD
+        # 2. RENDER NUSCENES LIDAR POINT CLOUD
         pts = self.sample_data.get('points')
         if pts is not None and len(pts) > 0:
             ax.scatter(pts[:, 0], pts[:, 1], c='#64748B', s=0.8, alpha=0.25, zorder=3)
 
-        # 3. RENDER 3D BOUNDING BOXES REALI
+        # 3. RENDER 3D BOUNDING BOXES REALI ANNOTATI DA NUSCENES
         boxes = self.sample_data.get('boxes', [])
         for box in boxes:
-            corners = box.corners_3d[:2, :]  # 2D corners (x, y)
+            corners = box.corners_3d[:2, :]  # Estrae le coordinate 2D dei 4 vertici del bounding box
             corners_closed = np.hstack([corners, corners[:, :1]])
             ax.plot(corners_closed[0, :], corners_closed[1, :], color='#00E5FF', linewidth=1.0, alpha=0.7, zorder=4)
 
@@ -125,24 +156,29 @@ class GroundTruthVisualizer:
                 c_name = CLASS_NAMES[c]
                 c_color = CLASS_COLORS[c_name]
                 
+                # Converte gli indici della griglia 2D in coordinate metriche rispetto al veicolo
                 y_idx, x_idx = np.where(c_mask)
                 x_m = (x_idx - grid_dim / 2.0) * voxel_size
                 y_m = (y_idx - grid_dim / 2.0) * voxel_size
                 
+                # Disegna i punti positivi della Ground Truth con il colore della classe
                 ax.scatter(x_m, y_m, c=c_color, s=8, alpha=0.85, zorder=6, label=c_name)
 
+        # Imposta i limiti degli assi spaziali a [-40m, +40m]
         ax.set_xlim(-40, 40)
         ax.set_ylim(-40, 40)
+        # Imposta il titolo del pannello di mappa
         ax.set_title(title_str, color='#F8FAFC', fontsize=11, fontweight='bold', pad=10)
 
     def plot_current(self):
+        # Carica il campione nuScenes corrispondente all'indice corrente
         self.sample_data = self.adapter.get_sample_data(self.current_idx)
         scene_token = self.sample_data.get('scene_token', '')
         
-        # Estrazione Ground Truth Reale nuScenes (6 Canali)
+        # Estrazione della Ground Truth Reale nuScenes sui 6 Canali
         real_gt_masks = extract_ground_truth_masks(self.sample_data)
         
-        # Iniezione Ground Truth Sintetica (Stress Test ad Alta Densità)
+        # Iniezione della Ground Truth Sintetica per lo Stress Test ad Alta Densità
         syn_gt_masks, syn_count = generate_synthetic_injected_gt(self.sample_data)
         
         # 1. Disegno Pannello Sinistro: GT REALE nuScenes
@@ -157,7 +193,7 @@ class GroundTruthVisualizer:
             f"2. GROUND TRUTH SINTETICA (Stress Test +{syn_count} Ostacoli)\nFrame {self.current_idx + 1}/{self.total_samples}"
         )
         
-        # 3. Aggiornamento HUD Informativo di Sinistra
+        # 3. Aggiornamento dell'HUD Informativo a Sinistra
         self.ax_hud.clear()
         self.ax_hud.axis('off')
         
@@ -168,6 +204,7 @@ class GroundTruthVisualizer:
         self.ax_hud.text(0.05, 0.82, "―" * 32, color='#334155', fontsize=10)
         self.ax_hud.text(0.05, 0.78, "OSTACOLI REALI 3D (nuScenes):", color='#F8FAFC', fontsize=9, fontweight='bold')
         
+        # Conteggio dei pixel positivi per ciascuna classe nella Ground Truth reale
         real_counts = np.sum(real_gt_masks > 0.5, axis=(1, 2))
         y_pos = 0.73
         for c in range(6):
@@ -181,6 +218,7 @@ class GroundTruthVisualizer:
         self.ax_hud.text(0.05, y_pos - 0.01, "―" * 32, color='#334155', fontsize=10)
         y_pos -= 0.05
         
+        # Conteggio dei pixel positivi per lo Stress Test Sintetico
         self.ax_hud.text(0.05, y_pos, "STRESS TEST SINTETICO:", color='#F59E0B', fontsize=9, fontweight='bold')
         y_pos -= 0.04
         self.ax_hud.text(0.08, y_pos, f"Ostacoli Iniettati: +{syn_count} verosimili", color='#E2E8F0', fontsize=8)
@@ -194,9 +232,12 @@ class GroundTruthVisualizer:
             self.ax_hud.text(0.08, y_pos, f"• {c_name:<12}: {cnt} px positivi", color=c_color, fontsize=8)
             y_pos -= 0.038
 
+        # Istruzioni di navigazione in basso nell'HUD
         self.ax_hud.text(0.05, 0.05, "FRECCE: Naviga Fotogrammi\nTASTO 'R': Rigenera Sintetici", color='#64748B', fontsize=8)
         
+        # Aggiorna la tela grafica
         self.fig.canvas.draw()
 
+# Blocco principale di esecuzione se lo script viene eseguito direttamente da riga di comando
 if __name__ == "__main__":
     GroundTruthVisualizer(dataroot="./nuscenes")

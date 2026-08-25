@@ -1,25 +1,34 @@
-# Agente Neurale Per-Zone di Inferenza per la Stima delle Occlusioni (per_zone_occlusion_agent.py)
-# Carica i pesi addestrati (per_zone_checkpoint.pth) ed esegue l'inferenza del modello ibrido PerZoneModel
+# Agente Neurale Per-Zone di Inferenza per la Stima delle Occlusioni (inferenza_agenti/neural_agent.py)
+# Carica i pesi addestrati (per_zone_checkpoint.pth / per_zone_checkpoint_focal_semantica.pth / per_zone_checkpoint_asl.pth)
+# ed esegue l'inferenza del modello ibrido PerZoneModel.
 # Per ciascuna zona d'ombra di ciascun fotogramma:
-# - Ritaglia il patch visivo 2D (10, 64, 64) dai 10 canali d'ingresso BEV
-# - Estrae il vettore delle 4 feature scalari numeriche (area_sqm, distance_m, occluder_w, occluder_h)
-# - Esegue l'inferenza forward con la Sigmoid per ottenere 5 probabilità indipendenti di presenza
-# - Salva i risultati probabilistici nei file JSON della cartella extracted_occlusions_per_zone/
+#   - Ritaglia il patch visivo 2D (11, 64, 64) dagli 11 canali d'ingresso BEV
+#   - Estrae il vettore delle 9 feature scalari numeriche (4 geometriche + 5 semantiche)
+#   - Esegue l'inferenza forward con la Sigmoid per ottenere le 6 probabilità di presenza
+#   - Salva i risultati probabilistici nei file JSON della cartella extracted_occlusions_per_zone/
 
+# Import dei moduli di sistema per la manipolazione dei percorsi e file
 import os
 import sys
 import glob
 import json
+# Import di numpy per le operazioni matriciali sui canali ed i ritagli dei patch
 import numpy as np
+# Import di torch e funzionali per il calcolo neurale PyTorch e l'interpolazione bilineare
 import torch
 import torch.nn.functional as F
 
+# Aggiunge la cartella radice del progetto al sys.path per consentire l'importazione dei moduli interni
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Import di cv2 (OpenCV) per la ricerca dei contorni delle superfici semantiche
 import cv2
+# Import delle primitive geometriche Shapely per l'intersezione delle sotto-zone
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.ops import unary_union
+# Import del dataset neurale e della funzione di rasterizzazione dei poligoni
 from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetNeural, rasterize_polygon
+# Import dell'architettura neurale PerZoneModel
 from architettura_neurale.per_zone_model import PerZoneModel
 
 # Funzione di utilità per fondere le maschere semantiche del terreno (numpy 2D o liste di poligoni) in un unico poligono Shapely (unary_union)
@@ -234,7 +243,7 @@ class PerZoneOcclusionAgent:
                     if xmax <= xmin or ymax <= ymin:
                         continue
                         
-                    # Ritaglio e resize del patch visivo dell'ombra a (10, 64, 64)
+                    # Ritaglio e resize del patch visivo dell'ombra a (11, 64, 64)
                     patch = input_tensor[:, ymin:ymax+1, xmin:xmax+1]
                     patch_resized = F.interpolate(patch.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).to(self.device, dtype=torch.float32)
                     
@@ -349,6 +358,7 @@ class PerZoneOcclusionAgent:
         print(f"Predizioni Agente Per-Zone completate e salvate in: {os.path.abspath(out_dir)}\n")
 
 
+# Blocco principale di esecuzione se avviato da riga di comando
 if __name__ == "__main__":
     dataset = OcclusionDatasetNeural(dataset_name="nuscenes", dataroot="./nuscenes")
     agent = PerZoneOcclusionAgent()  # Carica automaticamente il miglior checkpoint disponibile!

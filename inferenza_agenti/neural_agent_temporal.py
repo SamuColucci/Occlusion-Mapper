@@ -12,17 +12,25 @@
 # Le probabilità temporali aggiornate vengono salvate in: extracted_occlusions_temporal/
 # Il confronto con i risultati statici è visibile dalla dashboard (Opzione 8).
 
+# Import dei moduli di sistema per la manipolazione dei percorsi
 import os
 import sys
+# Import di glob per la ricerca di file su disco
 import glob
+# Import di json per la serializzazione e lettura delle predizioni
 import json
+# Import di numpy per le operazioni algebriche vettoriali
 import numpy as np
+# Import di torch per la gestione del calcolo e delle funzioni neurali
 import torch
 import torch.nn.functional as F
 
+# Aggiunge la cartella radice del progetto al sys.path per l'importazione dei pacchetti interni
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Import dell'agente neurale base PerZoneOcclusionAgent e della funzione di suddivisione in sub-zone
 from inferenza_agenti.neural_agent import PerZoneOcclusionAgent, subdivide_occlusion_into_subzones
+# Import del caricatore del dataset OcclusionDatasetNeural
 from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetNeural
 
 # ── Parametri della Curva Temporale Ramp-Up → Picco → Decadimento → Prior ──────
@@ -48,7 +56,7 @@ def apply_temporal_update(p_model: float, t_in_shadow: int, p_prev: float | None
     Returns:
         float: Probabilità aggiornata con la memoria temporale.
     """
-    # Nessun oggetto tracciato → usa il modello statico puro
+    # Nessun oggetto tracciato → usa la probabilità del modello statico puro
     if t_in_shadow < 0 or p_prev is None:
         return p_model
     
@@ -66,6 +74,7 @@ def apply_temporal_update(p_model: float, t_in_shadow: int, p_prev: float | None
         alpha = min(1.0, (t_in_shadow - T_DECAY) / (T_RESET - T_DECAY + 1))
         p_updated = (1.0 - alpha) * p_prev + alpha * P_PRIOR
     
+    # Restituisce il valore arrotondato a 4 cifre decimali
     return round(float(p_updated), 4)
 
 
@@ -76,6 +85,7 @@ class TemporalPerZoneAgent(PerZoneOcclusionAgent):
     """
 
     def process_dataset(self, dataset, out_dir="extracted_occlusions_temporal"):
+        # Crea la cartella di destinazione per le predizioni temporali salvate
         os.makedirs(out_dir, exist_ok=True)
         print(f"\nInizio generazione predizioni Agente Temporale Per-Zone per {len(dataset)} campioni...")
         print(f"  Output: {os.path.abspath(out_dir)}")
@@ -148,7 +158,7 @@ class TemporalPerZoneAgent(PerZoneOcclusionAgent):
                 occ_id = f"{cx:.0f}_{cy:.0f}"
                 active_occ_ids.add(occ_id)
 
-                # Inferenza statica tramite classe base
+                # Inferenza statica tramite la classe base
                 patch = input_tensor[:, ymin:ymax+1, xmin:xmax+1]
                 patch_resized = F.interpolate(patch.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).to(self.device, dtype=torch.float32)
 
@@ -219,11 +229,12 @@ class TemporalPerZoneAgent(PerZoneOcclusionAgent):
                 new_occ["temporal_update_applied"] = True
                 per_zone_occlusions.append(new_occ)
 
-            # Pulizia della memoria: rimuovi ombra che non esiste più nel frame corrente
+            # Pulizia della memoria: rimuovi l'ombra che non esiste più nel frame corrente
             for old_id in list(mem.keys()):
                 if old_id not in active_occ_ids:
                     del mem[old_id]
 
+            # Salva il file JSON contenente le predizioni aggiornate temporalmente
             out_path = os.path.join(out_dir, f"occlusion_per_zone_{idx:04d}_{sample_token}.json")
             with open(out_path, "w") as f:
                 json.dump({
@@ -243,6 +254,7 @@ class TemporalPerZoneAgent(PerZoneOcclusionAgent):
         print(f"Predizioni Agente Temporale completate e salvate in: {os.path.abspath(out_dir)}\n")
 
 
+# Blocco principale di esecuzione se eseguito direttamente
 if __name__ == "__main__":
     dataset = OcclusionDatasetNeural(dataset_name="nuscenes", dataroot="./nuscenes")
     agent = TemporalPerZoneAgent()

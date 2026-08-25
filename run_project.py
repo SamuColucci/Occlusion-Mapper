@@ -1,21 +1,25 @@
-# Pannello di Controllo ed Esecuzione della Pipeline (Run).
+# Pannello di Controllo ed Esecuzione della Pipeline (run_project.py).
 # Questo script funge da menu interattivo centralizzato per avviare
 # i calcoli geometrici del RayCaster, l'Agente Bayesiano, l'addestramento UNet 2D e l'Agente Per-Zone.
 
+# Import dei moduli di sistema per la manipolazione di processi, tempo e file
 import os
 import sys
 import time
 import subprocess
 import shutil
 
+# Funzione ausiliaria per la pulizia del terminale di comando
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
+# Funzione ausiliaria per l'esecuzione protetta dei vari script di calcolo
 def run_script(cmd_list, description=""):
     if description:
         print(f"\n>>> Avvio fase: {description}...")
     try:
         start_t = time.time()
+        # Esegue lo script Python tramite il medesimo interprete sys.executable
         res = subprocess.run([sys.executable] + cmd_list, check=True)
         if res.returncode == 0:
             print(f"[SUCCESS] Fase completata in {time.time() - start_t:.1f} secondi.")
@@ -29,6 +33,7 @@ def run_script(cmd_list, description=""):
         input("\nPremi INVIO per tornare al menu...")
         return False
 
+# Funzione per il reset totale dei dati temporanei e dei pesi addestrati
 def clean_data():
     print("\nPulizia delle cartelle dei risultati in corso...")
     folders = [
@@ -37,6 +42,7 @@ def clean_data():
         "extracted_occlusions_neural",
         "extracted_occlusions_per_zone"
     ]
+    # Rimuove le cartelle di output se presenti su disco
     for f in folders:
         if os.path.exists(f):
             try:
@@ -45,6 +51,7 @@ def clean_data():
             except Exception as e:
                 print(f"  -> Impossibile rimuovere {f}: {e}")
 
+    # Rimuove i file di checkpoint salvati
     for ckpt in ["unet_occlusion_checkpoint.pth", "per_zone_checkpoint.pth"]:
         if os.path.exists(ckpt):
             try:
@@ -55,6 +62,7 @@ def clean_data():
     print("Pulizia completata con successo.")
     input("\nPremi INVIO per tornare al menu...")
 
+# Ciclo di gestione del menu interattivo da terminale
 def main():
     while True:
         clear_screen()
@@ -85,18 +93,21 @@ def main():
         
         choice = input(" Inserisci la tua scelta [1-7]: ").strip()
         
+        # Opzione 1: Raycasting LiDAR
         if choice == '1':
             clear_screen()
             print("ESTRAZIONE OCCLUSIONI GEOMETRICHE DA NUSCENES...")
             run_script(["estrazione_zone_occluse.py"], "RayCasting e Space Carving LiDAR")
             input("\nElaborazione completata. Premi INVIO per tornare al menu...")
             
+        # Opzione 2: Calcolo Bayesiano
         elif choice == '2':
             clear_screen()
             print("AVVIO CALCOLO PROBABILITÀ CONDIZIONATE BAYESIANE...")
             run_script(["conditional_probability_dataset.py"], "Calcolo Bayesiano Probabilità Condizionate")
             input("\nCalcolo Bayesiano completato con successo. Premi INVIO per tornare al menu...")
             
+        # Opzione 3: Addestramento ed inferenza UNet 2D
         elif choice == '3':
             clear_screen()
             print("ADDESTRAMENTO RETE NEURALE UNET 2D & GENERAZIONE PREDIZIONI...")
@@ -104,6 +115,7 @@ def main():
                 run_script(["neural_occlusion_agent.py"], "Generazione Inferenza Neurale UNet 2D")
             input("\nAddestramento ed Inferenza UNet 2D completati con successo. Premi INVIO per tornare al menu...")
             
+        # Opzione 4: Addestramento ed inferenza Per-Zone
         elif choice == '4':
             clear_screen()
             print("ADDESTRAMENTO RETE NEURALE PER-ZONE (PATCH 64x64 + SCALARI)...")
@@ -111,6 +123,7 @@ def main():
                 run_script(["per_zone_occlusion_agent.py"], "Generazione Inferenza Neurale Per-Zone")
             input("\nAddestramento ed Inferenza Per-Zone completati con successo. Premi INVIO per tornare al menu...")
             
+        # Opzione 5: Esecuzione pipeline completa in sequenza
         elif choice == '5':
             clear_screen()
             print("AVVIO PIPELINE DI RUN ALL COMPLETA...")
@@ -126,10 +139,12 @@ def main():
                     
             input("\nPipeline RUN ALL completata con successo! Premi INVIO per tornare al menu...")
             
+        # Opzione 6: Reset e pulizia delle cartelle temporanee
         elif choice == '6':
             clear_screen()
             clean_data()
             
+        # Opzione 7: Chiusura ed uscita dal menu
         elif choice == '7':
             print("\nChiusura del pannello di esecuzione.")
             break
@@ -137,5 +152,6 @@ def main():
             print("\n[WARNING] Scelta non valida! Inserisci un numero da 1 a 7.")
             time.sleep(1.5)
 
+# Blocco principale di esecuzione da riga di comando
 if __name__ == "__main__":
     main()

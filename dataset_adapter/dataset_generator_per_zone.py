@@ -1,21 +1,29 @@
-# Generatore del Dataset Neurale Per-Zone (OcclusionDatasetPerZone)
+# Generatore del Dataset Neurale Per-Zone (dataset_adapter/dataset_generator_per_zone.py)
 # Trasforma ogni cono d'ombra del dataset nuScenes in una coppia di addestramento:
 # - Patch Visivo 2D (10, 64, 64) estratto dai 10 canali d'ingresso BEV
-# - Vettore di 4 Feature Scalari Numeriche (area_sqm, distance_m, occluder_width_m, occluder_height_m)
-# - Vettore di Target Ground Truth (5 classi binarie binarizzate dagli ostacoli 3D reali nuScenes)
+# - Vettore di 9 Feature Scalari Numeriche (4 geometriche + 5 semantiche)
+# - Vettore di Target Ground Truth (6 classi binarie binarizzate dagli ostacoli 3D reali nuScenes)
 
+# Import dei moduli di sistema per la gestione dei file e percorsi
 import os
 import json
+# Import di numpy per le operazioni algebriche ed array multidimensionali
 import numpy as np
+# Import di torch per la creazione dei tensori PyTorch
 import torch
 import torch.nn.functional as F
+# Import delle classi Dataset e DataLoader dal modulo torch.utils.data
 from torch.utils.data import Dataset, DataLoader
 
+# Aggiunge la cartella radice del progetto al sys.path per consentire l'importazione dei pacchetti interni
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Import delle librerie PIL per le operazioni di disegno e rasterizzazione di immagini binarie
 from PIL import Image, ImageDraw
+# Import della factory per l'adattatore del dataset
 from dataset_adapter.factory_dataset import create_adapter
+# Import delle funzioni di estrazione e rasterizzazione della Ground Truth
 from ground_truth.ground_truth_extractor import extract_ground_truth_masks, rasterize_polygon, get_occlusion_ground_truth_target
 
 # Parametri della griglia Bird's Eye View (BEV)
@@ -23,36 +31,47 @@ GRID_DIM = 200
 GRID_RANGE = 40.0
 VOXEL_SIZE = 0.4
 
-# Metodo per convertire un poligono da coordinate metriche a coordinate pixel
+# Metodo per convertire un poligono da coordinate metriche a coordinate pixel sull'immagine BEV
 def rasterize_polygon(polygon_pts_m, grid_dim=GRID_DIM, grid_range=GRID_RANGE, voxel_size=VOXEL_SIZE):
+    # Se il poligono ha meno di 3 vertici, restituisce una maschera binaria vuota
     if len(polygon_pts_m) < 3:
         return np.zeros((grid_dim, grid_dim), dtype=np.float32)
 
     img_pts = []
+    # Scorre ciascun vertice metrico in metri [X, Y]
     for x, y in polygon_pts_m:
+        # Trasforma la coordinata metrica in indice pixel 2D dell'immagine
         px = int((x + grid_range) / voxel_size)
         py = int((y + grid_range) / voxel_size)
         px = max(0, min(grid_dim - 1, px))
         py = max(0, min(grid_dim - 1, py))
         img_pts.append((px, py))
 
+    # Crea un'immagine PIL monocromatica a 8-bit (L) inizializzata a 0
     img = Image.new('L', (grid_dim, grid_dim), 0)
+    # Disegna il poligono riempiendo l'area interna con il valore 1
     ImageDraw.Draw(img).polygon(img_pts, outline=1, fill=1)
+    # Restituisce la matrice come array numpy di float32
     return np.array(img, dtype=np.float32)
 
+# Classe Dataset PyTorch per l'estrazione delle maschere BEV globali
 class OcclusionDatasetNeural(Dataset):
     def __init__(self, dataset_name="nuscenes", dataroot="./nuscenes"):
         print(f"Inizializzazione OcclusionDatasetNeural ({dataset_name})...")
+        # Inizializza l'adapter del dataset tramite la factory
         self.adapter = create_adapter(dataset_name, dataroot)
+        # Recupera il numero totale di campioni
         self.num_samples = self.adapter.get_num_samples()
         
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
+        # Recupera i dati del fotogramma dall'adapter
         frame_data = self.adapter.get_sample_data(idx)
         lidar_channel = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
         points = frame_data.get("points", np.zeros((0, 3)))
+        # Mappa i punti LiDAR 3D nella griglia BEV 200x200
         if len(points) > 0:
             for px_m, py_m in points[:, :2]:
                 px = int((px_m + GRID_RANGE) / VOXEL_SIZE)
@@ -63,6 +82,7 @@ class OcclusionDatasetNeural(Dataset):
         token = frame_data["sample_token"]
         json_path = os.path.join("extracted_occlusions", f"{token}.json")
         shadow_channel = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
+        # Carica ed accumula le zone d'ombra nel canale dedicato
         if os.path.exists(json_path):
             with open(json_path, "r") as f:
                 raw_data = json.load(f)
@@ -74,24 +94,29 @@ class OcclusionDatasetNeural(Dataset):
                         mask = rasterize_polygon(pts_xy)
                         shadow_channel = np.maximum(shadow_channel, mask)
 
+        # Estrae le maschere semantiche del terreno HD Map
         semantic_map = frame_data.get("semantic_map", {})
         drivable_mask = semantic_map.get('drivable_area', np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32))
         walkway_mask = semantic_map.get('walkway', np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32))
         ped_crossing_mask = semantic_map.get('ped_crossing', np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32))
+        # Estrae le maschere di Ground Truth reale a 6 canali
         target_masks = extract_ground_truth_masks(frame_data)
         input_channels = [lidar_channel, shadow_channel, drivable_mask, walkway_mask, ped_crossing_mask]
         target_tensor = torch.tensor(target_masks, dtype=torch.float32)
+        # Concatena i canali d'ingresso ed i canali di target nel tensore finale a 11 canali (5 input + 6 target)
         input_tensor = torch.tensor(np.stack(input_channels + list(target_masks), axis=0), dtype=torch.float32)
         return input_tensor, target_tensor
 
+# Classe Dataset PyTorch per l'addestramento della Rete Neurale Per-Zone
 class OcclusionDatasetPerZone(Dataset):
     def __init__(self, dataset_name="nuscenes", dataroot="./nuscenes", patch_size=(64, 64)):
-        # Carica il dataset base a 10 canali BEV
+        # Carica il dataset base a canali BEV
         self.base_dataset = OcclusionDatasetNeural(dataset_name=dataset_name, dataroot=dataroot)
         self.patch_size = patch_size
         self.samples = []
         
         print("\nEstrazione dei patch e delle feature per-zone su tutto il dataset...")
+        # Costruisce la lista di tutti i campioni per-zone estratti dai coni d'ombra
         self._build_samples()
         print(f"Dataset Per-Zone completato: Estratti {len(self.samples)} coni d'ombra totali.\n")
 
@@ -101,7 +126,7 @@ class OcclusionDatasetPerZone(Dataset):
             if (idx + 1) % 20 == 0 or (idx + 1) == total_frames:
                 print(f"  Progresso Estrazione Patch: {idx+1}/{total_frames} fotogrammi elaborati...")
                 
-            # Estrazione dei tensori d'ingresso (10, 200, 200) e target (5, 200, 200) per il fotogramma corrente
+            # Estrazione dei tensori d'ingresso e target per il fotogramma corrente
             input_tensor, target_tensor = self.base_dataset[idx]
             frame_data = self.base_dataset.adapter.get_sample_data(idx)
             sample_token = frame_data['sample_token']
@@ -136,7 +161,7 @@ class OcclusionDatasetPerZone(Dataset):
                 if xmax <= xmin or ymax <= ymin:
                     continue
                     
-                # Ritaglio del patch 2D dai 10 canali d'ingresso e ridimensionamento a (10, 64, 64)
+                # Ritaglio del patch 2D dai canali d'ingresso e ridimensionamento a (10, 64, 64)
                 patch = input_tensor[:, ymin:ymax+1, xmin:xmax+1]
                 patch_resized = F.interpolate(patch.unsqueeze(0), size=self.patch_size, mode='bilinear', align_corners=False).squeeze(0)
                 
@@ -154,7 +179,7 @@ class OcclusionDatasetPerZone(Dataset):
                 
                 scalars = torch.tensor([area_sqm, distance_m, occ_w, occ_h, road_f, side_f, cross_f, park_f, terr_f], dtype=torch.float32)
                 
-                # Calcolo della Target Ground Truth Reale per le 5 classi semantiche tramite il modulo dedicato ground_truth_extractor.py
+                # Calcolo della Target Ground Truth Reale per le 6 classi semantiche
                 target_classes = get_occlusion_ground_truth_target(target_tensor, pts)
                 target_vec = torch.tensor(target_classes, dtype=torch.float32)
                 
@@ -176,6 +201,7 @@ class OcclusionDatasetPerZone(Dataset):
         return s['patch'], s['scalars'], s['target']
 
 
+# Blocco principale di autoverifica (Self-Test) se eseguito direttamente
 if __name__ == "__main__":
     ds = OcclusionDatasetPerZone()
     if len(ds) > 0:

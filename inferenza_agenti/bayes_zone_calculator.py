@@ -1,9 +1,19 @@
+# Calcolatore Bayesiano Condizionato per Sotto-Zone Semantiche (bayes_zone_calculator.py)
+# Modulo algebrico centrale per il calcolo delle probabilità a priori condizionate:
+#   - Mappa le probabilità di base (BASE_PROB) per ciascuna superficie (carreggiata, marciapiede, strisce, ecc.)
+#   - Calcola il varco minimo di passaggio in metri (W_sub) tramite l'Oriented Bounding Box (OBB)
+#   - Modula la probabilità condizionata in base alle dimensioni del varco ed alla superficie in metri quadri
+#   - Inietta il boost temporale al 95% se un ostacolo passato è ora nascosto nella sotto-zona d'ombra.
+
+# Import di numpy per operazioni matriciali, algebriche e calcolo norme di vettori
 import numpy as np
+# Import di cv2 (OpenCV) per le operazioni di ricerca dei contorni sulle maschere 2D
+import cv2
+# Import delle primitive geometriche di Shapely per l'intersezione e la fusione di superfici
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.ops import unary_union
 
-# Definiamo le probabilità a priori di trovare una determinata categoria di ostacoli in base al tipo di superficie semantica del terreno
-
+# Probabilità a priori di base BASE_PROB raggruppate per tipo di superficie semantica del terreno
 BASE_PROB = {
     # Auto: alta priorità su parcheggi/piazzali (0.65) e strada (0.30); quasi nulla su marciapiede e terreno
     "Auto":       {
@@ -106,10 +116,8 @@ BASE_PROB = {
     }
 }
 
-import cv2
-
 # Funzione ausiliaria per unificare una lista di poligoni vettoriali o una matrice 2D semantica (200x200) in un unico oggetto geometrico Shapely
-# Convert le maschere 2D binarie in metri BEV (-40m .. +40m) e applica buffer(0) per riparare la topologia
+# Converte le maschere 2D binarie in metri BEV (-40m .. +40m) e applica buffer(0) per riparare la topologia
 def _build_union_(layer_data):
     if layer_data is None:
         return None
@@ -180,6 +188,7 @@ def width_filter(poly):
     except Exception:
         return 0.0
 
+# Restituisce il moltiplicatore di inibizione/sblocco fisico in base all'ampiezza del varco W_sub
 def get_width_coeff(w, category, is_road):
     # 1. Varco stretto (< 1.0m): impedisce l'accesso ai veicoli (auto, camion, bus)
     if w < 1.0:
@@ -188,14 +197,14 @@ def get_width_coeff(w, category, is_road):
             "Pedone": 1.00, "Bicicletta": 0.50, "Moto": 0.50, 
             "Barriera": 1.00, "Cono": 1.00, "Altro": 0.20
         }
-    # 2. Varco (1.0m - 1.8m): la probabilità di trovare auto aumenta
+    # 2. Varco (1.0m - 1.8m): la probabilità di trovare auto aumenta leggermente
     elif w < 1.8:
         table = {
             "Auto": 0.05, "Camion": 0.00, "Bus": 0.00, "Rimorchio": 0.00,
             "Pedone": 1.00, "Bicicletta": 1.00, "Moto": 1.00, 
             "Barriera": 1.00, "Cono": 1.00, "Altro": 0.30
         }
-    # 3. Varco (1.8m - 2.5m): la probabilità di trovare auto aumenta
+    # 3. Varco (1.8m - 2.5m): la probabilità di trovare auto aumenta al 50%
     elif w < 2.5:
         table = {
             "Auto": 0.50, "Camion": 0.20, "Bus": 0.20, "Rimorchio": 0.10,
@@ -209,7 +218,7 @@ def get_width_coeff(w, category, is_road):
             "Pedone": 0.80, "Bicicletta": 1.00, "Moto": 1.00, 
             "Barriera": 1.00, "Cono": 1.00, "Altro": 0.80
         }
-    # 5. Varco (>= 4.0m)
+    # 5. Varco (>= 4.0m): sblocco completo per tutte le categorie
     else:
         table = {
             "Auto": 1.00, "Camion": 1.00, "Bus": 1.00, "Rimorchio": 1.00,
@@ -219,6 +228,7 @@ def get_width_coeff(w, category, is_road):
         
     return table.get(category, 1.0)
 
+# Calcola le probabilità condizionate Bayesiane per ciascuna sotto-zona d'ombra
 def conditional_probablity_occlusion_zone(occ, semantic_map, currently_occluded_past_categories=None):
     poly_pts = occ.get("polygon_points_m", [])
     if len(poly_pts) < 3:

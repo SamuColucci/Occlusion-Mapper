@@ -1,20 +1,30 @@
-# Script per analizzare i file Json ottenuti durante l'estrazione delle zone occluse
+# Script per analizzare i file Json ottenuti durante l'estrazione delle zone occluse (inferenza_agenti/bayes_agent.py).
 # Ora le analizziamo per calcolare le probabilità condizionate di trovare una determinata categoria di ostacoli 
-# in base al tipo di superficie semantica del terreno
+# in base al tipo di superficie semantica del terreno ed alla memoria storica degli oggetti passati.
 
+# Import dei moduli di sistema per la manipolazione dei percorsi e file
 import os
-import numpy as np
-import json
-from shapely.geometry import Polygon as ShapelyPolygon, Point as ShapelyPoint
 import sys
+# Import di numpy per calcoli algebrici ed operazioni vettoriali
+import numpy as np
+# Import di json per la lettura e deserializzazione dei file di predizione
+import json
+# Import delle primitive geometriche di Shapely per i controlli punto-in-poligono
+from shapely.geometry import Polygon as ShapelyPolygon, Point as ShapelyPoint
+
+# Aggiunge la cartella radice del progetto al sys.path per consentire l'importazione dei moduli interni
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Import dell'adapter di fabbrica per la gestione agnostica del dataset
 from dataset_adapter.factory_dataset import create_adapter
+# Import del RayCaster per il tracciamento dei raggi
 from raycaster.ray_caster import RayCaster
+# Import della funzione di calcolo Bayesiano condizionato per la zona d'ombra
 from inferenza_agenti.bayes_zone_calculator import conditional_probablity_occlusion_zone
 
 # Metodo per il mapping tra i nomi delle categorie usati nel dataset e quelli usati nel resto del codice
 def map_category_name(raw_name):
+    # Converte il testo della categoria in lettere minuscole per rendere la ricerca agnostica dal maiuscolo/minuscolo
     name_lower = raw_name.lower()
     if "car" in name_lower or "vehicle" in name_lower:
         return "Auto"
@@ -43,6 +53,7 @@ def main():
     dataset_name = "nuscenes"
     dataroot = "./nuscenes"
     print(f"Caricamento adattatore dataset: {dataset_name}...")
+    # Istanzia l'adapter nuScenes
     adapter = create_adapter(dataset_name, dataroot)
     
     # Estraiamo gli indici dei frame raggruppati per scena
@@ -55,10 +66,11 @@ def main():
     print("Inizio estrazione zone occluse e calcolo delle probabilità...")
     boost_records = []
 
+    # Scorre tutte le scene del dataset
     for scene_token, frame_indices in scene_dict.items():
         print(f"\n--- Elaborazione Scena: {scene_token} ({len(frame_indices)} frame) ---")
         
-        # Reset temporaneo delle istanze viste per ogni scena
+        # Reset temporaneo delle istanze viste per ogni scena (memoria temporale)
         seen_instances = {} 
 
         # Scansione cronologica dei frame della scena
@@ -108,6 +120,7 @@ def main():
                 # Inviamo solo le categorie occluse che ricadono ESCLUSIVAMENTE DENTRO questa specifica ombra!
                 specific_boost_cats = occ_boost_map.get(i, set())
                 
+                # Invocazione della funzione di calcolo Bayesiano condizionato per la zona d'ombra
                 occ_prob = conditional_probablity_occlusion_zone(
                     occ, 
                     frame_data["semantic_map"], 
@@ -172,5 +185,6 @@ def main():
 
     print("=" * 70 + "\n")
 
+# Blocco principale di esecuzione se avviato da riga di comando
 if __name__ == "__main__":
     main()

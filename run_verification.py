@@ -1,13 +1,20 @@
+# Script di Esecuzione e Verifica Automatica Completa dell'Intero Progetto (run_verification.py)
+# Esegue in sequenza automatizzata la compilazione sintattica, l'addestramento dei 6 modelli neurali,
+# l'inferenza batch, le metriche di confronto, lo stress test sintettico e l'esportazione Markdown.
+
+# Import dei moduli di sistema per l'esecuzione dei processi figlio e gestione eccezioni
 import os
 import sys
 import subprocess
 import traceback
 
+# Funzione per l'esecuzione protetta di un singolo test di compilazione o script
 def run_test(name, cmd_list):
     print(f"\n==================================================", flush=True)
     print(f" [TESTING] {name}", flush=True)
     print(f"==================================================", flush=True)
     try:
+        # Avvia lo script Python tramite il medesimo interprete sys.executable
         res = subprocess.run([sys.executable] + cmd_list, text=True, check=True)
         print(f"[SUCCESS] {name} completato con esito positivo!", flush=True)
         return True
@@ -25,11 +32,13 @@ def run_test(name, cmd_list):
         traceback.print_exc()
         return False
 
+# Ciclo principale di esecuzione della batteria di test
 def main():
     print("===============================================================", flush=True)
     print("   AVVIO RIGENERAZIONE E VERIFICA COMPLETA DELL'INTERO PROGETTO", flush=True)
     print("===============================================================", flush=True)
     
+    # Elenco completo delle fasi di compilazione e test di integrazione
     tests = [
         ("Compilazione Modulo Architettura Neurale", ["-m", "py_compile", "architettura_neurale/per_zone_model.py", "architettura_neurale/loss_functions.py"]),
         ("Compilazione Modulo Dataset Adapter", ["-m", "py_compile", "dataset_adapter/dataset_generator_per_zone.py", "dataset_adapter/dataset_generator_surrounding.py", "dataset_adapter/nuscenes_dataset_adapter.py", "dataset_adapter/adapter_dataset.py", "dataset_adapter/factory_dataset.py"]),
@@ -52,6 +61,7 @@ def main():
     ]
     
     failed_tests = []
+    # Scorre ciascuna fase e ne registra l'esito
     for name, cmd in tests:
         ok = run_test(name, cmd)
         if not ok:
@@ -66,5 +76,6 @@ def main():
             print(f" - {ft}")
     print("=" * 65 + "\n")
 
+# Blocco principale di esecuzione da riga di comando
 if __name__ == "__main__":
     main()
