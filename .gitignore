@@ -7,15 +7,23 @@ data/
 venv/
 ENV/
 
-# Checkpoint Pesi Neurali
+# Checkpoint Pesi Neurali e Tensori Pesanti
 *.pth
 pesi_modelli/
+*.bin
 
 # File JSON e Cache di estrazione
 *.json
+extracted_occlusions/
+extracted_occlusions_neural/
+extracted_occlusions_per_zone/
+extracted_occlusions_probabilities/
+extracted_occlusions_temporal/
 
 # Rendering grafici ed esportazioni
 *.png
+*.jpg
+*.jpeg
 *.xls
 *.xlsx
 *.csv
@@ -23,8 +31,21 @@ pesi_modelli/
 # Cache di Python
 __pycache__/
 *.pyc
+*.pyo
 
-# Cartelle IDE e Gemini Agent
+# Cartelle IDE e Agent
 .vscode/
 .idea/
 .gemini/
+.agents/
+
+# ===================================================================
+# CARTELLE DI TEST, PROVE TEMPORANEE E SCRATCH (NON PUSHABILI)
+# ===================================================================
+prove/
+_prove/
+**/prove/
+**/_prove/
+scratch/
+test_modello/
+**/test_modello/

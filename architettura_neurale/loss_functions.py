@@ -162,38 +162,58 @@ class AsymmetricLoss(nn.Module):
     """
     def __init__(self, gamma_neg=4.0, gamma_pos=1.0, clip=0.05, pos_weights=[2.0, 3.0, 3.0, 3.0, 3.0, 2.0], eps=1e-8):
         super(AsymmetricLoss, self).__init__()
+        # gamma_neg: esponente per le classi negative (4.0)
+        # gamma_pos: esponente per le classi positive (1.0)
+        # clip: se la probabilità stimata è minore del clip, allora viene considerata come clip
+        # pos_weights: pesi pos_weights per le classi positive
+        # eps: valore epsilon per la componente negativa
         self.gamma_neg = gamma_neg
         self.gamma_pos = gamma_pos
         self.clip = clip
         self.pos_weights = pos_weights
         self.eps = eps
 
+    # logits: output del modello
+    # targets: ground truth
+    # scalars: feature scalari ()
     def forward(self, logits, targets, scalars=None):
+        # Calcola le probabilità (valori tra 0 e 1) applicando la sigmoide ai logit.
+        # I logit sono i valori in output dal modello prima della sigmoide. 
         probs = torch.sigmoid(logits)
+        # Assicura che i target siano dello stesso tipo dei logit.
         targets = targets.type_as(logits)
 
-        # 1. Componente Positiva (y = 1) con esponente gamma_pos=1.0 e pesi pos_weights
+        # Componente Positiva (y = 1) con esponente gamma_pos=1.0 e pesi pos_weights
+        # Copia le probabilità per la componente positiva (questa parte della loss si applica solo quando il target è 1)
         probs_pos = probs
         targets_pos = targets
+        # Moltiplica per targets_pos per applicare la loss solo dove il target è 1, ovvero vero
         loss_pos = targets_pos * torch.log(torch.clamp(probs_pos, min=self.eps))
+        # Se gamma_pos > 0, applica il fattore di modulazione per i positivi
+        # Questo permette alla rete di ignorare i positivi facili, concentrandosi sui positivi difficili
+        # Ovvero quelli con basse probabilità a favore di quelli più complessi
         if self.gamma_pos > 0:
             loss_pos *= (1.0 - probs_pos) ** self.gamma_pos
             
+        # Applica i pesi pos_weights alle classi positive
         pos_w = torch.tensor(self.pos_weights, device=logits.device)
         loss_pos = loss_pos * pos_w
 
-        # 2. Componente Negativa (y = 0) con Margin Shift (clip = 0.05) ed esponente gamma_neg=4.0
+        # Inverso della ground truth al fine di calcolare l'errore per le zone vuote
         probs_neg = 1.0 - probs
         targets_neg = 1.0 - targets
         
         # Applica lo shift di margine per azzerare i gradienti dei negativi facili con p < 0.05
+        # Ovvero le zone con bassa probabilità a favore dei falsi negativi da correggere
         if self.clip is not None and self.clip > 0:
             probs_neg = torch.clamp(probs_neg + self.clip, max=1.0)
 
+        # Gamma_neg: esponente per le classi negative (4.0)
         loss_neg = targets_neg * torch.log(torch.clamp(probs_neg, min=self.eps))
         if self.gamma_neg > 0:
             loss_neg *= (1.0 - probs_neg) ** self.gamma_neg
 
+        # Inversione del segno per la somma finale, in modo da minimizzare la loss
         loss = - (loss_pos + loss_neg)
         return loss.mean()
 

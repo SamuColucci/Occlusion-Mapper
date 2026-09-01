@@ -28,17 +28,19 @@ from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.ops import unary_union
 # Import del dataset neurale e della funzione di rasterizzazione dei poligoni
 from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetNeural, rasterize_polygon
-# Import dell'architettura neurale PerZoneModel
-from architettura_neurale.per_zone_model import PerZoneModel
+# Import delle architetture neurali dal modulo architettura_neurale
+from architettura_neurale import AttentionPerZoneModel, PerZoneModel
 
 # Funzione di utilità per fondere le maschere semantiche del terreno (numpy 2D o liste di poligoni) in un unico poligono Shapely (unary_union)
 def _build_union_(layer_masks):
+    # Se la maschera non esiste restituisce none
     if layer_masks is None or (isinstance(layer_masks, (list, tuple, np.ndarray)) and len(layer_masks) == 0):
         return None
     polys = []
     
     # Se la maschera è un array 2D numpy (200x200), converte i contorni pixel in coordinate metriche (metri)
     if isinstance(layer_masks, np.ndarray) and layer_masks.ndim == 2:
+        # Trova i contorni validi della superficie
         contours, _ = cv2.findContours((layer_masks > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for cnt in contours:
             if len(cnt) >= 3:
@@ -46,26 +48,40 @@ def _build_union_(layer_masks):
                 # Trasformazione da pixel (0-199) a coordinate metriche (-40m a +40m)
                 x_m = (pts[:, 0] * 0.4) - 40.0
                 y_m = 40.0 - (pts[:, 1] * 0.4)
+                # Crea un poligono shapely con i punti validi
                 p = ShapelyPolygon(np.column_stack((x_m, y_m)))
                 if p.is_valid and p.area > 0.01:
+                    # Aggiunge il poligono alla lista se valido e con area sufficiente
                     polys.append(p)
+    # Altrimenti se la maschera è una lista di poligoni
     elif isinstance(layer_masks, (list, tuple)):
         for mask in layer_masks:
+            # Controlla se la maschera è un array 2D numpy
             if isinstance(mask, np.ndarray) and mask.ndim == 2:
+                # Trova i contorni validi della superficie
                 contours, _ = cv2.findContours((mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 for cnt in contours:
+                    # Se i contorni sono validi
                     if len(cnt) >= 3:
                         pts = cnt.squeeze(axis=1)
+                        # Trasformazione da pixel (0-199) a coordinate metriche (-40m a +40m)
                         x_m = (pts[:, 0] * 0.4) - 40.0
                         y_m = 40.0 - (pts[:, 1] * 0.4)
+                        # Crea un poligono shapely con i punti validi
                         p = ShapelyPolygon(np.column_stack((x_m, y_m)))
                         if p.is_valid and p.area > 0.01:
+                            # Aggiunge il poligono alla lista se valido e con area sufficiente
                             polys.append(p)
+            # Altrimenti se la maschera è una lista di poligoni
             elif isinstance(mask, (list, tuple)):
                 for p_pts in mask:
+                    # Se i contorni sono validi
                     if len(p_pts) >= 3:
+                        # Crea un poligono shapely con i punti validi
                         p = ShapelyPolygon(p_pts)
+                        # Se il poligono è valido e con area sufficiente
                         if p.is_valid and p.area > 0.01:
+                            # Aggiunge il poligono alla lista
                             polys.append(p)
     if not polys:
         return None
@@ -74,7 +90,9 @@ def _build_union_(layer_masks):
 
 # Scompone la zona d'ombra principale in sotto-zone disgiunte in base al tipo di terreno semantico
 def subdivide_occlusion_into_subzones(occ, semantic_map):
+    # Estrae i punti del poligono della zona d'ombra
     poly_pts = occ.get("polygon_points_m", [])
+    # Se i punti non sono validi
     if len(poly_pts) < 3:
         return occ
     try:
@@ -103,12 +121,15 @@ def subdivide_occlusion_into_subzones(occ, semantic_map):
     sub_zones = []
     remaining_poly = poly
 
+    # Itera attraverso i layer semantici ordinati per priorità
     for label, layer_geom in layers_ordered:
+        # Se il layer semantico non esiste o è vuoto o l'ombra residua è vuota
         if layer_geom is None or layer_geom.is_empty or remaining_poly.is_empty:
             continue
         try:
             # Calcola l'intersezione tra l'ombra residua ed il layer semantico del terreno
             inter = remaining_poly.intersection(layer_geom)
+            # Se l'intersezione è vuota o ha area insufficiente
             if inter.is_empty or inter.area < 0.001:
                 continue
             sub_area = float(inter.area)
@@ -138,16 +159,22 @@ def subdivide_occlusion_into_subzones(occ, semantic_map):
 
     # Terreno residuo non coperto da mappe semantiche specifiche
     if not remaining_poly.is_empty and remaining_poly.area >= 0.001:
+        # Calcola l'area residua
         rem_area = float(remaining_poly.area)
+        # Se il poligono residuo è valido
         if remaining_poly.geom_type == 'Polygon':
             coords_xy = np.array(remaining_poly.exterior.coords)
+        # Se il poligono residuo è un MultiPolygon
         elif remaining_poly.geom_type == 'MultiPolygon':
             largest = max(remaining_poly.geoms, key=lambda p: p.area)
             coords_xy = np.array(largest.exterior.coords)
+        # Altrimenti
         else:
             coords_xy = pts_xy
 
+        # Coordinate convertite in [y_ahead, x_right]
         coords_yx = np.column_stack([coords_xy[:, 1], coords_xy[:, 0]])
+        # Punti del poligono residuo arrotondati a 3 cifre decimali
         rem_pts = [[round(float(pt[0]), 3), round(float(pt[1]), 3)] for pt in coords_yx]
 
         sub_zones.append({
@@ -157,46 +184,58 @@ def subdivide_occlusion_into_subzones(occ, semantic_map):
             "polygon_points_m": rem_pts
         })
 
+    # Copia la zona d'ombra e aggiunge le sotto-zone
     occ_copy = dict(occ)
     occ_copy["sub_zones"] = sub_zones
     return occ_copy
 
+# Classe Agente Neurale Per-Zone
 class PerZoneOcclusionAgent:
     # Inizializzazione dell'Agente Neurale Per-Zone
     def __init__(self, checkpoint_path=None, device=None):
+        # Se non viene specificato un device, seleziona automaticamente il migliore disponibile (CUDA o CPU)
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = device
             
         print(f"Inizializzazione PerZoneOcclusionAgent su: {self.device}")
-        self.model = PerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(self.device)
-        
-        # Selezione automatica del miglior checkpoint disponibile se non fornito esplicitamente
+        # Selezione automatica del checkpoint disponibile se non fornito esplicitamente
         if checkpoint_path is None:
             raw_candidates = [
-                "per_zone_checkpoint_focal_semantica.pth",
-                "per_zone_checkpoint_asl.pth",
+                "per_zone_checkpoint_attention_neuro.pth",
+                "per_zone_checkpoint_asl_standard.pth",
                 "per_zone_checkpoint_surrounding.pth",
-                "per_zone_checkpoint_focal.pth",
-                "per_zone_checkpoint_semantica.pth",
                 "per_zone_checkpoint.pth"
             ]
             candidates = []
+            # Crea una lista di checkpoint candidati da provare in ordine di priorità
             for c in raw_candidates:
                 candidates.append(os.path.join("pesi_modelli", c))
                 candidates.append(c)
-            checkpoint_path = next((c for c in candidates if os.path.exists(c)), os.path.join("pesi_modelli", "per_zone_checkpoint_focal_semantica.pth"))
+            # Seleziona il primo checkpoint candidato che esiste, altrimenti seleziona il checkpoint di default
+            checkpoint_path = next((c for c in candidates if os.path.exists(c)), os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro.pth"))
 
         self.checkpoint_used = checkpoint_path
+        # Se il checkpoint contiene "attention", usa il modello con attenzione, altrimenti usa il modello standard
+        if "attention" in checkpoint_path.lower():
+            from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
+            self.model = AttentionPerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(self.device)
+        else:
+            from architettura_neurale.per_zone_model import PerZoneModel
+            self.model = PerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(self.device)
+
+        # Carica i pesi del modello se il checkpoint esiste
         if os.path.exists(checkpoint_path):
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
+            state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
+            self.model.load_state_dict(state_dict)
             print(f"Pesi Per-Zone caricati con successo da: {checkpoint_path}")
         else:
             print(f"[WARNING] Checkpoint '{checkpoint_path}' non trovato!")
             
         # Imposta la rete in modalità valutazione/inferenza (eval)
+        # Pesi fissati e rete neurale pronta per essere utilizzata
         self.model.eval()
 
     # Scorre tutti i fotogrammi del dataset e genera i file JSON probabilistici per-zone
@@ -204,29 +243,36 @@ class PerZoneOcclusionAgent:
         os.makedirs(out_dir, exist_ok=True)
         print(f"\nInizio generazione predizioni Agente Per-Zone (Patch + Scalari) per {len(dataset)} campioni...")
 
+        # Itera attraverso tutti i campioni del dataset
         for idx in range(len(dataset)):
+            # Ottiene i dati di input e i dati del frame
             input_tensor, _ = dataset[idx]
             frame_data = dataset.adapter.get_sample_data(idx)
+            # Estrae il token del campione, il token del lidar e il token della scena
             sample_token = frame_data['sample_token']
             lidar_token = frame_data['lidar_token']
             scene_token = frame_data.get('scene_token', '')
 
             # Caricamento delle zone d'ombra dal file JSON base estratto dal RayCaster
             json_base_path = os.path.join("extracted_occlusions", f"{sample_token}.json")
+            # Se il file JSON non esiste, salta al prossimo campione
             if not os.path.exists(json_base_path):
                 continue
-                
+
+            # Apri e carica i dati JSON dal file base
             with open(json_base_path, "r") as f:
                 raw_data = json.load(f)
                 raw_occlusions = raw_data.get("occlusions", [])
 
+            # Lista di zone d'ombra per-zone
             per_zone_occlusions = []
             for raw_occ in raw_occlusions:
                 pts = raw_occ.get("polygon_points_m", [])
+                # Se la zona d'ombra ha punti sufficienti
                 if len(pts) >= 3:
                     # Calcola le sotto-zone dinamiche tramite intersezione semantica col terreno
                     occ = subdivide_occlusion_into_subzones(raw_occ, frame_data["semantic_map"])
-                if len(pts) >= 3:
+                    # Se la zona d'ombra ha punti sufficienti
                     # Bounding box in pixel attorno alla zona d'ombra nella griglia 200x200
                     pts_np = np.array(pts)
                     y_ahead = pts_np[:, 0]
@@ -234,9 +280,11 @@ class PerZoneOcclusionAgent:
                     px_x = np.clip(((x_right + 40.0) / 0.4).astype(int), 0, 199)
                     px_y = np.clip(((40.0 - y_ahead) / 0.4).astype(int), 0, 199)
                     
+                    # Calcola i bordi del bounding box attorno alla zona d'ombra nella griglia 200x200
                     xmin, xmax = max(0, np.min(px_x)), min(199, np.max(px_x))
                     ymin, ymax = max(0, np.min(px_y)), min(199, np.max(px_y))
                     
+                    # Aggiunge un margine di 2 pixel attorno alla zona d'ombra
                     xmin, xmax = max(0, xmin - 2), min(199, xmax + 2)
                     ymin, ymax = max(0, ymin - 2), min(199, ymax + 2)
                     
@@ -257,17 +305,20 @@ class PerZoneOcclusionAgent:
                     sub_zones_raw = occ.get("sub_zones", [])
                     processed_sub_zones = []
                     
+                    # Se ci sono delle sotto-zone
                     if sub_zones_raw:
+                        # Accumulatore di probabilità globali
                         global_probs_acc = {k: 0.0 for k in ["Auto", "Pedone", "Camion", "Bicicletta", "Moto", "Bus", "Rimorchio", "Barriera"]}
                         total_weight = 0.0
                         
+                        # Itera attraverso tutte le sotto-zone
                         for sz in sub_zones_raw:
                             surf_name = sz.get("surface", "driveable_surface")
                             frac = float(sz.get("area_fraction", 1.0))
                             sz_area = float(sz.get("area_sqm", area_sqm * frac))
                             sz_w = float(sz.get("occlusion_width_m", occ_w))
                             
-                            # One-Hot / Continuous Surface Flags
+                            # flags relative al tipo di superficie
                             r_flag = 1.0 if surf_name == "driveable_surface" else 0.0
                             s_flag = 1.0 if surf_name == "sidewalk" else 0.0
                             c_flag = 1.0 if surf_name == "ped_crossing" else 0.0
@@ -277,10 +328,12 @@ class PerZoneOcclusionAgent:
                             # Feature scalari della specifica sotto-zona (9 scalari: 4 geometrici + 5 semantici)
                             sz_scalars = torch.tensor([[sz_area, distance_m, sz_w, occ_h, r_flag, s_flag, c_flag, p_flag, t_flag]], dtype=torch.float32).to(self.device)
                             
+                            # Passa la sotto-zona al modello e ottieni le probabilità
                             with torch.no_grad():
                                 sz_logits = self.model(patch_resized, sz_scalars)
                                 sz_probs_raw = torch.sigmoid(sz_logits).squeeze(0).cpu().numpy()
                                 
+                            # Assegna le probabilità alle variabili
                             sz_p_auto = float(sz_probs_raw[0])
                             sz_p_camion = float(sz_probs_raw[1])
                             sz_p_ped = float(sz_probs_raw[2])
@@ -288,6 +341,7 @@ class PerZoneOcclusionAgent:
                             sz_p_bici = float(sz_probs_raw[4])
                             sz_p_barriera = float(sz_probs_raw[5])
                             
+                            # Dizionario delle probabilità
                             sz_probs_dict = {
                                 "Auto": round(sz_p_auto, 4),
                                 "Pedone": round(sz_p_ped, 4),
@@ -300,14 +354,17 @@ class PerZoneOcclusionAgent:
                                 "Cono": 0.0,
                                 "Altro": 0.0
                             }
-                            
+
+                            # Aggiunge il dizionario delle probabilità alla sotto-zona
                             new_sz = dict(sz)
                             new_sz["estimated_probabilities"] = sz_probs_dict
                             processed_sub_zones.append(new_sz)
                             
+                            # Aggiorna le probabilità globali con le probabilità massime di ogni classe
                             for k in global_probs_acc:
                                 global_probs_acc[k] = max(global_probs_acc[k], sz_probs_dict[k])
                                 
+                        # Arrotonda le probabilità globali a 4 decimali
                         estimated_probabilities = {k: round(v, 4) for k, v in global_probs_acc.items()}
                     else:
                         # Inferenza singola se l'ombra non è suddivisa (9 scalari)
@@ -316,11 +373,14 @@ class PerZoneOcclusionAgent:
                         cross_f = float(occ.get("crosswalk_fraction", 0.0))
                         park_f = float(occ.get("carpark_fraction", 0.0))
                         terr_f = max(0.0, 1.0 - (road_f + side_f + cross_f + park_f))
+                        
+                        # Feature scalari dell'ombra (9 scalari: 4 geometrici + 5 semantici)
                         scalars = torch.tensor([[area_sqm, distance_m, occ_w, occ_h, road_f, side_f, cross_f, park_f, terr_f]], dtype=torch.float32).to(self.device)
                         with torch.no_grad():
                             logits = self.model(patch_resized, scalars)
                             probs = torch.sigmoid(logits).squeeze(0).cpu().numpy()
                             
+                        # Dizionario delle probabilità
                         estimated_probabilities = {
                             "Auto": round(float(probs[0]), 4),
                             "Camion": round(float(probs[1]), 4),
@@ -334,6 +394,7 @@ class PerZoneOcclusionAgent:
                             "Altro": 0.0
                         }
 
+                    # Aggiunge le probabilità stimate alla sotto-zona considerata
                     new_occ = dict(occ)
                     new_occ["estimated_probabilities"] = estimated_probabilities
                     new_occ["sub_zones"] = processed_sub_zones
@@ -351,10 +412,11 @@ class PerZoneOcclusionAgent:
                     "num_occlusions": len(per_zone_occlusions),
                     "occlusions": per_zone_occlusions
                 }, f, indent=4)
-
+            # Stampa il progresso ogni 50 campioni o alla fine
             if (idx + 1) % 50 == 0 or (idx + 1) == len(dataset):
                 print(f"  Progresso Inferenza Per-Zone: {idx+1}/{len(dataset)} campioni elaborati...")
 
+        # Messaggio finale di completamento
         print(f"Predizioni Agente Per-Zone completate e salvate in: {os.path.abspath(out_dir)}\n")
 
 

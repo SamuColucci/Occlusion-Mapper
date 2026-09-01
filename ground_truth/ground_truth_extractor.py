@@ -70,12 +70,16 @@ def extract_ground_truth_masks(frame_data):
             cat = ''
 
         # Estrazione dei 4 vertici dell'ingombro a terra 2D [X, Y] espressi in metri
-        if hasattr(box, 'bottom_corners'):
-            corners = box.bottom_corners()[:2].T
-        elif hasattr(box, 'corners'):
-            corners = box.corners()[:2, :4].T
+        if hasattr(box, 'corners'):
+            c = box.corners()
+            corners_xy = c[:2, [0, 1, 5, 4]].T # Footprint 2D BEV ordinato
+            corners = corners_xy[:, [1, 0]]     # [Y, X] per rasterize_polygon
+        elif hasattr(box, 'bottom_corners'):
+            c = box.bottom_corners()[:2].T
+            corners = c[:, [1, 0]]
         elif isinstance(box, dict):
-            corners = box.get('bottom_corners', [])
+            c = np.array(box.get('bottom_corners', []))
+            corners = c[:, [1, 0]] if len(c) > 0 else []
         else:
             corners = []
 
@@ -120,11 +124,8 @@ def get_occlusion_ground_truth_target(target_tensor, poly_pts):
     if poly_pts is None or len(poly_pts) < 3:
         return target_classes
         
-    # Prepara le coordinate dei vertici dell'ombra
-    pts_np = np.array(poly_pts)
-    pts_xy = np.column_stack([pts_np[:, 1], pts_np[:, 0]])
     # Rasterizza la maschera binaria 2D della specifica zona d'ombra
-    poly_mask = rasterize_polygon(pts_xy) > 0.5
+    poly_mask = rasterize_polygon(poly_pts) > 0.5
     
     # Interroga ciascuno dei 6 canali GT SOLO ed ESCLUSIVAMENTE sui pixel ricadenti nell'ombra
     if np.any(poly_mask):
@@ -139,6 +140,9 @@ def get_occlusion_ground_truth_target(target_tensor, poly_pts):
 
 # Blocco principale di autoverifica (Self-Test) se eseguito direttamente
 if __name__ == "__main__":
+    import os
+    import sys
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     from dataset_adapter.factory_dataset import create_adapter
     # Inizializza l'adapter nuScenes per il test
     adapter = create_adapter("nuscenes", "./nuscenes")

@@ -71,7 +71,7 @@ def generate_synthetic_injected_gt(frame_data, injection_rate=0.25, seed=42):
         
         # Se l'ombra ha un'area sufficiente (> 10m²) ed il generatore casuale la seleziona (tasso del 25%)
         if area >= 10.0 and np.random.rand() < injection_rate:
-            # 1. Rasterizza l'esatta maschera binaria 2D dell'ombra (200x200)
+            # Rasterizza l'esatta maschera binaria 2D dell'ombra (200x200)
             occ_mask = rasterize_polygon(poly_pts)
             y_indices, x_indices = np.where(occ_mask > 0.5)
             
@@ -83,7 +83,7 @@ def generate_synthetic_injected_gt(frame_data, injection_rate=0.25, seed=42):
             py_center = int(np.mean(y_indices))
             px_center = int(np.mean(x_indices))
             
-            # 2. Selezione dinamica della classe dell'ostacolo in base alla semantica del terreno
+            # Selezione dinamica della classe dell'ostacolo in base alla semantica del terreno
             if walkway_mask[py_center, px_center] > 0.5 or ped_crossing_mask[py_center, px_center] > 0.5:
                 chosen_class = np.random.choice([2, 4], p=[0.7, 0.3])  # 70% Pedone, 30% Bici su Marciapiede/Strisce
             elif drivable_mask[py_center, px_center] > 0.5:
@@ -98,7 +98,7 @@ def generate_synthetic_injected_gt(frame_data, injection_rate=0.25, seed=42):
             radius_px_x = max(1, int(round((length_m / 2.0) / VOXEL_SIZE)))
             radius_px_y = max(1, int(round((width_m / 2.0) / VOXEL_SIZE)))
             
-            # 3. Genera la maschera rettangolare dell'ostacolo centrata nel baricentro d'ombra
+            # Genera la maschera rettangolare dell'ostacolo centrata nel baricentro d'ombra
             obs_mask = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
             y_min = max(0, py_center - radius_px_y)
             y_max = min(GRID_DIM, py_center + radius_px_y + 1)
@@ -108,7 +108,7 @@ def generate_synthetic_injected_gt(frame_data, injection_rate=0.25, seed=42):
             # Assegna 1.0 al rettangolo dell'ostacolo
             obs_mask[y_min:y_max, x_min:x_max] = 1.0
             
-            # 4. VINCOLO RIGOROSO DI SICUREZZA: Interseca l'ostacolo CON LA MASCHERA D'OMBRA (obs_mask * occ_mask)
+            # Interseca l'ostacolo CON LA MASCHERA D'OMBRA (obs_mask * occ_mask)
             # Garantisce che NESSUN pixel dell'ostacolo esca fuori dalla zona occlusa!
             injected_obstacle_mask = obs_mask * occ_mask
             
@@ -122,6 +122,9 @@ def generate_synthetic_injected_gt(frame_data, injection_rate=0.25, seed=42):
 
 # Blocco principale di autoverifica (Self-Test) se eseguito direttamente da riga di comando
 if __name__ == "__main__":
+    import os
+    import sys
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     from dataset_adapter.factory_dataset import create_adapter
     adapter = create_adapter("nuscenes", "./nuscenes")
     sample_data = adapter.get_sample_data(0)
