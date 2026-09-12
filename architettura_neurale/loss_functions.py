@@ -193,7 +193,7 @@ class AsymmetricLoss(nn.Module):
         # Questo permette alla rete di ignorare i positivi facili, concentrandosi sui positivi difficili
         # Ovvero quelli con basse probabilità a favore di quelli più complessi
         if self.gamma_pos > 0:
-            loss_pos *= (1.0 - probs_pos) ** self.gamma_pos
+            loss_pos *= torch.clamp(1.0 - probs_pos, min=1e-6) ** self.gamma_pos
             
         # Applica i pesi pos_weights alle classi positive
         pos_w = torch.tensor(self.pos_weights, device=logits.device)
@@ -211,7 +211,7 @@ class AsymmetricLoss(nn.Module):
         # Gamma_neg: esponente per le classi negative (4.0)
         loss_neg = targets_neg * torch.log(torch.clamp(probs_neg, min=self.eps))
         if self.gamma_neg > 0:
-            loss_neg *= (1.0 - probs_neg) ** self.gamma_neg
+            loss_neg *= torch.clamp(1.0 - probs_neg, min=1e-6) ** self.gamma_neg
 
         # Inversione del segno per la somma finale, in modo da minimizzare la loss
         loss = - (loss_pos + loss_neg)

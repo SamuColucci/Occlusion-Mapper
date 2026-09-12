@@ -23,32 +23,80 @@ Esegue la simulazione del fascio LiDAR 3D polar-grid e calcola i poligoni 2D Bir
 
 ## 🎯 2. Visualizzatori Interattivi Ufficiali
 
-### A. Visualizzatore Ufficiale del Modello Finale (`verify_runtime_attention.py`)
-Esegue l'**inferenza live su GPU** del modello `AttentionPerZoneModel` mostrando a schermo:
-* La mappa BEV HD con i coni d'ombra classificati per stato ($TP, FP, FN, TN$).
-* Toggle istantaneo tra **Ground Truth Sintetica Neurosimbolica** e **Ground Truth Reale nuScenes** (Tasto `M` o `G`).
-* Conteggi di frazione per classe: `Trovati (TP / Totale Scena)` (es. `10/11`), metriche di classe e barre di probabilità `[████░░░]`.
-```powershell
-.\.venv\Scripts\python.exe visualizzatori/verify_runtime_attention.py
-```
-* **Comandi**: Frecce SX/DX (naviga frame), Tasto M/G (cambia Ground Truth), Tasto R (raggio 20m/25m), Click Mouse (ispezione zona).
+I visualizzatori si trovano in `visualizzatori/`. Possono essere avviati singolarmente oppure affiancati al viewer ufficiale nuScenes tramite il launcher `avvia_entrambi.py`.
 
-### B. Visualizzatore Probabilità Condizionata Bayesiana (`verify_runtime_bayes.py`)
-Mostra l'aggiornamento bayesiano spaziale guidato dalle superfici della mappa HD e dai vincoli OBB delle zone occluse:
+### Avvio Singolo (frame opzionale 1-404)
 ```powershell
-.\.venv\Scripts\python.exe visualizzatori/verify_runtime_bayes.py
+.\.venv\Scripts\python.exe visualizzatori/<nome_vis>.py [frame]
 ```
 
-### C. Visualizzatore Confronto Ground Truth (`verify_runtime_ground_truth.py`)
-Confronta affiancate in tempo reale la **Ground Truth 3D nuScenes** e la **Ground Truth Neurosimbolica con regole fisiche**:
+### Avvio Affiancato con nuScenes Explorer (sincronizzazione bidirezionale)
 ```powershell
-.\.venv\Scripts\python.exe visualizzatori/verify_runtime_ground_truth.py
+# Sintassi generale
+.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py [frame] [--FLAG]
+
+# Esempi rapidi
+.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17               # raycasting (default)
+.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17 --inputs       # input rete neurale
+.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17 --neural       # inferenza neurale
+.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17 --bayes        # probabilita bayesiana
+.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17 --gt           # ground truth
+.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17 --eval         # valutazione prestazioni
+```
+> Digita un numero di frame nel terminale del launcher per sincronizzare entrambe le finestre.
+
+---
+
+### A. Raycasting Occlusioni (`vis_raycasting_occlusioni.py`)
+Mappa BEV con coni d'ombra LiDAR, strutture statiche (muri/edifici), icone ostacoli e tooltip:
+```powershell
+.\.venv\Scripts\python.exe visualizzatori/vis_raycasting_occlusioni.py [frame]
+```
+**Comandi**: `</`>`/->` naviga frame, `T` toggle aux, `Click` ispeziona zona, `S` salva HD
+
+---
+
+### B. Input Multimodali Rete Neurale (`vis_input_rete_neurale.py`) - Figure 6 Tesi
+Dashboard che mostra esattamente cosa riceve la rete neurale per ogni frame:
+- **Sinistra**: Mappa BEV 25m con HD-Map, LiDAR, ombre, strutture statiche e icone ostacoli
+- **Destra**: Griglia degli **11 canali tensoriali** `(11, 200, 200)` + pesi Channel Attention (SE)
+- **Toggle "Rete Ausiliaria"**: ispezione del flusso 9 scalari -> MLP -> parametri FiLM gamma/beta
+```powershell
+.\.venv\Scripts\python.exe visualizzatori/vis_input_rete_neurale.py [frame]
+```
+**Comandi**: `</`>`/->` naviga, `T/Spazio/M` toggle rete ausiliaria, `Z/X` scorri zone ombra, `Click` ispeziona scalari FiLM, `S` salva HD
+
+---
+
+### C. Inferenza Neurale Live (`vis_inferenza_neurale.py`)
+Inferenza live su GPU con classificazione TP/FP/FN/TN e barre di probabilita per classe:
+```powershell
+.\.venv\Scripts\python.exe visualizzatori/vis_inferenza_neurale.py [frame]
+```
+**Comandi**: `</`>`/->` naviga, `M/G` cambia GT (Sintetica/Reale), `R` raggio 20m/25m, `Click` ispeziona
+
+---
+
+### D. Probabilita Bayesiana Condizionata (`vis_probabilita_bayes.py`)
+Approccio alternativo senza rete neurale: aggiornamento bayesiano guidato da HD Map e OBB:
+```powershell
+.\.venv\Scripts\python.exe visualizzatori/vis_probabilita_bayes.py [frame]
 ```
 
-### D. Visualizzatore Benchmark Architetture (`verify_runtime_model_comparison.py`)
-Visualizza il confronto affiancato 1-a-1 tra la **Baseline Neurale (CNN Semplice)** e il **Modello Finale ad Attenzione (SE+FiLM)**:
+---
+
+### E. Ground Truth Occlusioni (`vis_ground_truth_occlusioni.py`)
+Confronto affiancato GT 3D nuScenes vs GT Neurosimbolica con regole fisiche:
 ```powershell
-.\.venv\Scripts\python.exe visualizzatori/verify_runtime_model_comparison.py
+.\.venv\Scripts\python.exe visualizzatori/vis_ground_truth_occlusioni.py [frame]
+```
+
+---
+
+### F. Dashboard Valutazione Prestazioni (`vis_valutazione_prestazioni.py`)
+Report interattivo con metriche Precision/Recall/F1/IoU per tutti i 404 frame:
+```powershell
+.\.venv\Scripts\python.exe visualizzatori/vis_valutazione_prestazioni.py [frame]
 ```
 
 ---
@@ -56,7 +104,7 @@ Visualizza il confronto affiancato 1-a-1 tra la **Baseline Neurale (CNN Semplice
 ## 🧠 3. Addestramento del Modello
 
 ### A. Addestramento Ufficiale su Ground Truth Sintetica Neurosimbolica
-Addestra l'architettura con **Channel Attention (Squeeze-and-Excitation)** e **Modulazione FiLM con Mappa HD** per 20 epoche su GPU, salvando i pesi in `pesi_modelli/per_zone_checkpoint_attention_neuro.pth`:
+Addestra `AttentionPerZoneModel` con Channel Attention (SE) e Modulazione FiLM per 20 epoche su GPU. Salva in `pesi_modelli/per_zone_checkpoint_attention_neuro_hybrid.pth`:
 ```powershell
 .\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py
 ```

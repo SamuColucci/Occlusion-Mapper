@@ -748,22 +748,31 @@ class RayCaster:
             if token:
                 object_occlusions[token].append((int(ix), int(iy)))
                         
-        # Pre-costruisce l'unione dei poligoni della mappa semantica per il calcolo delle frazioni di superficie
-        def _build_layer_union(poly_list):
-            polys = []
-            for coords in poly_list:
-                if len(coords) >= 3:
-                    try:
-                        p = ShapelyPolygon(coords)
-                        if not p.is_valid: p = p.buffer(0)
-                        if not p.is_empty: polys.append(p)
-                    except Exception: pass
-            return unary_union(polys) if polys else None
+        # Preparazione delle superfici della mappa semantica (supporta sia matrici raster NumPy che liste poligonali)
+        drivable_layer = self.semantic_map.get('drivable_area', None)
+        has_raster_map = isinstance(drivable_layer, np.ndarray)
+        if has_raster_map:
+            import cv2
+            drivable_r = np.rot90(drivable_layer, 3)
+            walkway_r = np.rot90(self.semantic_map.get('walkway', np.zeros((200, 200))), 3)
+            carpark_r = np.rot90(self.semantic_map.get('carpark_area', np.zeros((200, 200))), 3)
+            crossing_r = np.rot90(self.semantic_map.get('ped_crossing', np.zeros((200, 200))), 3)
+        else:
+            def _build_layer_union(poly_list):
+                polys = []
+                for coords in poly_list:
+                    if len(coords) >= 3:
+                        try:
+                            p = ShapelyPolygon(coords)
+                            if not p.is_valid: p = p.buffer(0)
+                            if not p.is_empty: polys.append(p)
+                        except Exception: pass
+                return unary_union(polys) if polys else None
 
-        road_union = _build_layer_union(self.semantic_map.get('drivable_area', []))
-        side_union = _build_layer_union(self.semantic_map.get('walkway', []))
-        carpark_union = _build_layer_union(self.semantic_map.get('carpark_area', []))
-        crosswalk_union = _build_layer_union(self.semantic_map.get('ped_crossing', []))
+            road_union = _build_layer_union(self.semantic_map.get('drivable_area', []))
+            side_union = _build_layer_union(self.semantic_map.get('walkway', []))
+            carpark_union = _build_layer_union(self.semantic_map.get('carpark_area', []))
+            crosswalk_union = _build_layer_union(self.semantic_map.get('ped_crossing', []))
 
         # Elaborazione di ogni singolo ostacolo
         for box in all_casters:
@@ -839,15 +848,36 @@ class RayCaster:
                     print(f"  [WARN] Shapely fallito per {box.token}: {e}")
 
             # Calcolo delle frazioni di superficie del terreno (road, sidewalk, carpark, crosswalk, terrain)
-            occ_area = sh_poly.area if (sh_poly is not None and not sh_poly.is_empty) else 0.0
-            if occ_area > 0:
-                road_frac = round(min(float(sh_poly.intersection(road_union).area / occ_area) if road_union else 0.0, 1.0), 4)
-                side_frac = round(min(float(sh_poly.intersection(side_union).area / occ_area) if side_union else 0.0, 1.0), 4)
-                carpark_frac = round(min(float(sh_poly.intersection(carpark_union).area / occ_area) if carpark_union else 0.0, 1.0), 4)
-                crosswalk_frac = round(min(float(sh_poly.intersection(crosswalk_union).area / occ_area) if crosswalk_union else 0.0, 1.0), 4)
-                terrain_frac = round(max(0.0, 1.0 - road_frac - side_frac - carpark_frac - crosswalk_frac), 4)
+            if has_raster_map and len(polygon_m) >= 3:
+                pts_grid = ((np.array(polygon_m) + 40.0) / 80.0 * 200.0).astype(np.int32)
+                poly_mask = np.zeros((200, 200), dtype=np.uint8)
+                cv2.fillPoly(poly_mask, [pts_grid], 1)
+                tot_px = int(np.sum(poly_mask == 1))
+                if tot_px > 0:
+                    is_poly = (poly_mask == 1)
+                    m_cross = is_poly & (crossing_r == 1)
+                    m_walk = is_poly & (walkway_r == 1) & ~m_cross
+                    m_road = is_poly & (drivable_r == 1) & ~m_cross & ~m_walk
+                    m_park = is_poly & (carpark_r == 1) & ~m_cross & ~m_walk & ~m_road
+                    m_terr = is_poly & ~m_cross & ~m_walk & ~m_road & ~m_park
+
+                    crosswalk_frac = round(float(np.sum(m_cross) / tot_px), 4)
+                    side_frac = round(float(np.sum(m_walk) / tot_px), 4)
+                    road_frac = round(float(np.sum(m_road) / tot_px), 4)
+                    carpark_frac = round(float(np.sum(m_park) / tot_px), 4)
+                    terrain_frac = round(float(np.sum(m_terr) / tot_px), 4)
+                else:
+                    road_frac, side_frac, carpark_frac, crosswalk_frac, terrain_frac = 0.0, 0.0, 0.0, 0.0, 1.0
             else:
-                road_frac, side_frac, carpark_frac, crosswalk_frac, terrain_frac = 0.0, 0.0, 0.0, 0.0, 1.0
+                occ_area = sh_poly.area if (sh_poly is not None and not sh_poly.is_empty) else 0.0
+                if occ_area > 0:
+                    road_frac = round(min(float(sh_poly.intersection(road_union).area / occ_area) if road_union else 0.0, 1.0), 4)
+                    side_frac = round(min(float(sh_poly.intersection(side_union).area / occ_area) if side_union else 0.0, 1.0), 4)
+                    carpark_frac = round(min(float(sh_poly.intersection(carpark_union).area / occ_area) if carpark_union else 0.0, 1.0), 4)
+                    crosswalk_frac = round(min(float(sh_poly.intersection(crosswalk_union).area / occ_area) if crosswalk_union else 0.0, 1.0), 4)
+                    terrain_frac = round(max(0.0, 1.0 - road_frac - side_frac - carpark_frac - crosswalk_frac), 4)
+                else:
+                    road_frac, side_frac, carpark_frac, crosswalk_frac, terrain_frac = 0.0, 0.0, 0.0, 0.0, 1.0
                 
             # Calcola la bounding box che racchiude l'intera ombra
             bbox = [float(np.min(xv_int)), float(np.min(yv_int)),

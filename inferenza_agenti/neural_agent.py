@@ -97,8 +97,7 @@ def subdivide_occlusion_into_subzones(occ, semantic_map):
         return occ
     try:
         pts_arr = np.array(poly_pts)
-        # polygon_points_m memorizza [y_ahead, x_right]. Convertiamo in [x_right, y_ahead] per Shapely
-        pts_xy = np.column_stack([pts_arr[:, 1], pts_arr[:, 0]])
+        pts_xy = pts_arr[:, :2]
         poly = ShapelyPolygon(pts_xy)
         if not poly.is_valid:
             poly = poly.buffer(0)

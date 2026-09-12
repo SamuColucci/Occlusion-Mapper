@@ -204,7 +204,8 @@ class AttentionPerZoneModel(nn.Module):
 
         # Uniamo il vettore dei 128 numeri visivi modificato con il vettore dei 128 numeri scalari
         combined = torch.cat([modulated_vis, sc_feat], dim=1) # [B, 256]
-        # Applica il classificatore ai dati combinati per ottenere i punteggi finali
+
+        # Applica il classificatore ai dati combinati per ottenere i logit finali (end-to-end)
         logits = self.classifier(combined)
         return logits
 

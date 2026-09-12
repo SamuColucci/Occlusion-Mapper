@@ -72,19 +72,44 @@ python addestramento/train_per_zone_real_gt.py
   ```
 
 ### 5. Visualizzatori Runtime Interattivi
+
+Tutti i visualizzatori si trovano in `visualizzatori/`. Possono essere avviati singolarmente o affiancati al viewer nuScenes ufficiale tramite `avvia_entrambi.py`.
+
+**Avvio affiancato (sincronizzazione bidirezionale con nuScenes Explorer):**
 ```bash
-# Visualizzatore del modello neurale finale con switch Ground Truth in tempo reale (tasto M/G)
-python visualizzatori/verify_runtime_attention.py
+# Sintassi
+python visualizzatori/avvia_entrambi.py [frame] [--FLAG]
 
-# Visualizzatore della probabilità condizionata Bayesiana
-python visualizzatori/verify_runtime_bayes.py
-
-# Visualizzatore comparativo Ground Truth Reale vs Sintetica
-python visualizzatori/verify_runtime_ground_truth.py
-
-# Visualizzatore comparativo Modello Base vs Modello Avanzato
-python visualizzatori/verify_runtime_model_comparison.py
+python visualizzatori/avvia_entrambi.py 17               # raycasting (default)
+python visualizzatori/avvia_entrambi.py 17 --inputs       # input rete neurale
+python visualizzatori/avvia_entrambi.py 17 --neural       # inferenza neurale
+python visualizzatori/avvia_entrambi.py 17 --bayes        # probabilita bayesiana
+python visualizzatori/avvia_entrambi.py 17 --gt           # ground truth
+python visualizzatori/avvia_entrambi.py 17 --eval         # valutazione prestazioni
 ```
+
+**Avvio singolo:**
+```bash
+# Raycasting Occlusioni (mappa BEV con ombre, strutture statiche, icone)
+python visualizzatori/vis_raycasting_occlusioni.py [frame]
+
+# Input Multimodali Rete Neurale - Figure 6 Tesi (11 canali BEV + Rete Ausiliaria MLP/FiLM)
+# Comandi: T/Spazio toggle ausiliaria, Z/X scorri zone, Click BEV ispeziona scalari, S salva HD
+python visualizzatori/vis_input_rete_neurale.py [frame]
+
+# Inferenza Neurale Live su GPU (TP/FP/FN/TN, barre probabilita, toggle GT con M/G)
+python visualizzatori/vis_inferenza_neurale.py [frame]
+
+# Probabilita Bayesiana Condizionata (approccio alternativo senza rete neurale)
+python visualizzatori/vis_probabilita_bayes.py [frame]
+
+# Ground Truth: confronto affiancato GT Reale vs GT Neurosimbolica
+python visualizzatori/vis_ground_truth_occlusioni.py [frame]
+
+# Dashboard Valutazione Prestazioni (metriche Precision/Recall/F1 sui 404 frame)
+python visualizzatori/vis_valutazione_prestazioni.py [frame]
+```
+
 
 ---
 

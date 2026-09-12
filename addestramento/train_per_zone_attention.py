@@ -1,73 +1,124 @@
-# Script di Addestramento per il Modello con Channel Attention (addestramento/train_per_zone_attention.py)
-# Addestra l'architettura AttentionPerZoneModel (11 canali BEV, 9 scalari, 6 classi di pericolo)
-# utilizzando la funzione Asymmetric Loss (ASL) e la supervisione Ground Truth Sintetica Neurosimbolica.
+# Script Ufficiale di Addestramento Unificato per AttentionPerZoneModel (addestramento/train_per_zone_attention.py)
+# Addestra l'architettura neurale con Channel Attention (Squeeze-and-Excitation) e condizionamento FiLM
+# supportando tutte le 4 modalità di supervisione dello studio di ablazione della tesi:
+# 1. 'geometric'      : GT Sintetica Neurosimbolica con vincoli 3D (Spatially-Constrained / Physical-Aware)
+# 2. 'semantic'       : GT Sintetica Neurosimbolica permissiva (Semantic-Affordance / Naïve Prior)
+# 3. 'real'           : GT Reale nuScenes completa (18.682 zone, inclusi i vuoti)
+# 4. 'positives_only' : GT Reale nuScenes addestrata ESCLUSIVAMENTE sulle zone con ostacoli reali
+# 5. 'all'            : Esegue l'addestramento sequenziale completo di tutte le configurazioni.
 
-# Import dei moduli di sistema per percorsi, filesystem e misurazione tempi
 import os
 import sys
 import time
 import json
-# Import di PyTorch e NumPy per il calcolo tensoriale e su GPU
 import torch
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 
-# Aggiunge la directory radice del progetto al sys.path per importare i moduli interni
+# Aggiunge la directory radice del progetto al sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Import dell'Adapter Factory per la lettura universale dei frame del dataset
 from dataset_adapter.factory_dataset import create_adapter
-# Import delle funzioni di estrazione e rasterizzazione della Ground Truth
 from ground_truth.ground_truth_extractor import extract_ground_truth_masks, rasterize_polygon, get_occlusion_ground_truth_target
-# Import dell'architettura AttentionPerZoneModel con Channel Attention (SE) e FiLM
+from ground_truth.ground_truth_extractor_synthetic import compute_synthetic_ground_truth
 from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
-# Import della funzione di costo Asymmetric Loss (CVPR 2021)
 from architettura_neurale.loss_functions import AsymmetricLoss
 
 
-def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, checkpoint_path=os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro.pth")):
-    # Selezione automatica dell'acceleratore hardware: GPU CUDA (NVIDIA) se disponibile, altrimenti CPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n===========================================================================")
-    print(f"   ADDESTRAMENTO MODELLO ATTENZIONE SU GROUND TRUTH SINTETICA NEUROSIMBOLICA")
-    print(f"===========================================================================")
-    print(f"Dispositivo Selezionato: {device}")
+def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric", checkpoint_path=None, split="train", force_extract=False):
+    """
+    Funzione di addestramento universale.
+    Supporta:
+      - gt_mode: 'geometric', 'semantic', 'hybrid', 'real', 'positives_only', 'all'.
+      - split: 'train' (8 scene mini_train, default), 'val' (2 scene mini_val), 'all' (tutte).
+    """
+    if gt_mode == "all":
+        print("\n" + "=" * 80)
+        print(f"   AVVIO ADDESTRAMENTO SEQUENZIALE DI TUTTI I MODELLI (--mode all, split: {split.upper()})")
+        print("=" * 80)
+        modes_to_train = ["geometric", "semantic", "hybrid", "real", "positives_only"]
+        for m in modes_to_train:
+            train_attention_neuro(epochs=epochs, batch_size=batch_size, lr=lr, gt_mode=m, split=split, force_extract=force_extract)
+        print("\n[COMPLETATO] Addestramento sequenziale di tutti i modelli terminato con successo!")
+        return
 
-    # Percorso per il salvataggio dei tensori pre-elaborati in cache su disco (velocizza i successivi riavvii)
-    cache_path = os.path.join("addestramento", "cached_dataset_neuro.pth")
-    if os.path.exists(cache_path):
-        # Se la cache esiste, carica direttamente i tensori già estratti e pronti
-        print(f"Caricamento dataset sintetico dalla cache: {cache_path}...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Mappatura automatica dei percorsi checkpoint
+    if checkpoint_path is None:
+        ckpt_map = {
+            "geometric": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_geometric.pth"),
+            "semantic": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_semantic.pth"),
+            "hybrid": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
+            "real": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth"),
+            "positives_only": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_positive_only.pth"),
+        }
+        checkpoint_path = ckpt_map.get(gt_mode, os.path.join("pesi_modelli", f"per_zone_checkpoint_attention_{gt_mode}.pth"))
+
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+
+    print(f"\n===========================================================================")
+    print(f"   ADDESTRAMENTO ATTENTION-PER-ZONE: [{gt_mode.upper()}] (SPLIT: {split.upper()})")
+    print(f"===========================================================================")
+    print(f"• Dispositivo Selezionato: {device}")
+    print(f"• Modalità Supervisione: {gt_mode.upper()}")
+    print(f"• Split Dataset: {split.upper()} (Ufficiale nuScenes)")
+    print(f"• Checkpoint di Output: {checkpoint_path}")
+
+    # Gestione Cache differenziata per modalità e split
+    split_suffix = f"_{split}" if split != "all" else ""
+    if gt_mode in ["real", "positives_only"]:
+        cache_path = os.path.join("addestramento", f"cached_dataset_per_zone{split_suffix}.pth")
+    else:
+        cache_path = os.path.join("addestramento", f"cached_dataset_neuro_{gt_mode}{split_suffix}.pth")
+
+    if os.path.exists(cache_path) and not force_extract:
+        print(f"• Caricamento dataset dalla cache: {cache_path}...")
         cache_data = torch.load(cache_path)
         patches, scalars, targets = cache_data["patches"], cache_data["scalars"], cache_data["targets"]
+
+        # Se positives_only: filtra mantenendo SOLO le zone con almeno un ostacolo reale
+        if gt_mode == "positives_only":
+            pos_mask = (targets.sum(dim=1) > 0)
+            patches = patches[pos_mask]
+            scalars = scalars[pos_mask]
+            targets = targets[pos_mask]
+            print(f"  [Filtro Positives-Only]: Mantenuti {len(patches)} campioni con ostacoli reali (escluse zone vuote).")
     else:
-        # Altrimenti, estrae e ritaglia tutti i campioni dal dataset nuScenes da zero
-        print("Generazione dataset sintetico per-zone nuScenes...")
+        print(f"• Generazione dataset [{gt_mode}] (split: {split.upper()}) da zero...")
         adapter = create_adapter("nuscenes", "./nuscenes")
         num_samples = adapter.get_num_samples()
 
+        from nuscenes.utils.splits import create_splits_scenes
+        splits_dict = create_splits_scenes()
+        train_scenes = set(splits_dict.get('mini_train', []))
+        val_scenes = set(splits_dict.get('mini_val', []))
+
         patches_list, scalars_list, targets_list = [], [], []
 
-        # Scorre ciascun fotogramma del dataset
         for idx in range(num_samples):
+            sample = adapter.all_samples[idx]
+            sc_name = adapter.nusc.get('scene', sample['scene_token'])['name']
+
+            # Filtro per scena in base allo split richiesto
+            if split == "train" and sc_name not in train_scenes:
+                continue
+            elif split == "val" and sc_name not in val_scenes:
+                continue
+
             if (idx + 1) % 50 == 0 or (idx + 1) == num_samples:
-                print(f"  Elaborazione: {idx+1}/{num_samples} frame...")
+                print(f"  Elaborazione: frame {idx+1}/{num_samples} (scena: {sc_name})...")
 
             frame_data = adapter.get_sample_data(idx)
             token = frame_data["sample_token"]
             
-            # Estrae le 6 maschere 2D degli ostacoli reali (Auto, Camion, Pedoni, Bici, Moto, Barriere)
             target_masks = extract_ground_truth_masks(frame_data)
-
-            # Estrae i layer semantici del terreno dalla Mappa HD
             semantic_map = frame_data['semantic_map']
             drivable_mask = np.maximum(semantic_map['drivable_area'], semantic_map.get('carpark_area', np.zeros_like(semantic_map['drivable_area'])))
             walkway_mask = semantic_map.get('walkway', np.zeros_like(drivable_mask))
             ped_crossing_mask = semantic_map.get('ped_crossing', np.zeros_like(drivable_mask))
 
-            # Assembla gli 11 canali di input BEV (200x200):
-            # 0: LiDAR, 1: Maschera Ombre, 2: Asfalto/Parcheggi, 3: Marciapiede, 4: Strisce, 5-10: Ostacoli Visibili
             input_channels = [
                 frame_data.get('lidar_bev', np.zeros((200, 200))),
                 frame_data.get('occlusion_mask', np.zeros((200, 200))),
@@ -78,14 +129,15 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, checkpoint_path=os.
 
             input_tensor = torch.tensor(np.stack(input_channels, axis=0), dtype=torch.float32)
 
-            # Carica le zone d'ombra estratte dal Raycaster per questo fotogramma
             occ_file = os.path.join("extracted_occlusions", f"{token}.json")
             if not os.path.exists(occ_file):
                 continue
             with open(occ_file) as f:
                 occs = json.load(f)["occlusions"]
 
-            # Itera su ciascuna zona d'ombra presente nel fotogramma
+            import cv2
+            dt_road_map = cv2.distanceTransform((1 - drivable_mask).astype(np.uint8), cv2.DIST_L2, 3) * 0.4
+
             for occ in occs:
                 pts = occ.get("polygon_points_m", [])
                 pts_np = np.array(pts)
@@ -93,19 +145,9 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, checkpoint_path=os.
                     continue
                 poly_xy = np.column_stack([pts_np[:, 1], pts_np[:, 0]])
 
-                # Calcola il rettangolo minimo orientato (Minimum Rotated Rectangle) per stimare larghezza e lunghezza
                 from shapely.geometry import Polygon as ShapelyPoly
                 sp = ShapelyPoly(poly_xy)
-                if sp.is_valid and sp.area > 0.01:
-                    mrr = sp.minimum_rotated_rectangle
-                    mrr_coords = np.array(mrr.exterior.coords)[:-1]
-                    e1 = np.linalg.norm(mrr_coords[0] - mrr_coords[1])
-                    e2 = np.linalg.norm(mrr_coords[1] - mrr_coords[2])
-                    obb_w, obb_l = min(e1, e2), max(e1, e2)
-                else:
-                    obb_w, obb_l = 0.2, 0.5
 
-                # Calcola le percentuali di copertura semantica dell'ombra sul terreno
                 occ_mask = rasterize_polygon(pts)
                 tot = np.sum(occ_mask)
                 road_f = np.sum(occ_mask * drivable_mask) / tot if tot > 0 else 0
@@ -115,27 +157,33 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, checkpoint_path=os.
                 area = float(occ.get("area_sqm", 0.0))
                 dist = float(occ.get("distance_m", 0.0))
 
-                # Step 1: Estrae la Ground Truth Reale nuScenes a 6 classi per l'ombra
+                # Calcolo prossimità al bordo strada (accosto / sosta entro 2.5m)
+                min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
+                roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
+
+                # Step 1: Estrae la Ground Truth Reale nuScenes a 6 classi
                 gt_raw_6 = get_occlusion_ground_truth_target(target_masks, pts)
 
-                # Step 2: Iniezione regole Neurosimboliche / Sintetiche (se non ci sono ostacoli reali)
-                gt_neuro_6 = np.zeros(6, dtype=np.float32)
-                if np.sum(gt_raw_6) > 0:
-                    gt_neuro_6 = np.array(gt_raw_6, dtype=np.float32)
-                else:
-                    # Regola Auto e Camion su asfalto in varchi ampi
-                    if road_f >= 0.25 and obb_w >= 1.8 and obb_l >= 3.8 and area >= 8.0:
-                        gt_neuro_6[0] = 1.0
-                        if road_f >= 0.30 and obb_w >= 2.4 and obb_l >= 6.5 and area >= 18.0:
-                            gt_neuro_6[1] = 1.0
-                    # Regola Pedoni su marciapiedi o strisce pedonali
-                    if (side_f >= 0.15 or cross_f >= 0.08 or (road_f >= 0.25 and obb_w < 1.8)) and obb_w >= 0.4 and area >= 0.6:
-                        gt_neuro_6[2] = 1.0  # Pedoni
-                    # Regola Barriere su terreno incolto laterale
-                    if terr_f >= 0.55 and obb_w >= 1.0 and area >= 3.0 and road_f < 0.15 and side_f < 0.10:
-                        gt_neuro_6[5] = 1.0  # Barriere
+                # Se positives_only e la zona e vuota, la saltiamo
+                if gt_mode == "positives_only" and np.sum(gt_raw_6) == 0:
+                    continue
 
-                # Calcola il bounding box in pixel attorno all'ombra nella mappa 200x200
+                # Step 2: Calcolo del target in base alla modalita
+                if gt_mode in ["real", "positives_only"]:
+                    gt_target = np.array(gt_raw_6, dtype=np.float32)
+                else:
+                    gt_target, _ = compute_synthetic_ground_truth(
+                        sp=sp,
+                        road_f=road_f,
+                        side_f=side_f,
+                        cross_f=cross_f,
+                        roadside_f=roadside_f,
+                        area=area,
+                        dist=dist,
+                        gt_raw_6=gt_raw_6,
+                        mode=gt_mode
+                    )
+
                 px_x = np.clip(((poly_xy[:, 0] + 40.0) / 0.4).astype(int), 0, 199)
                 px_y = np.clip(((40.0 - poly_xy[:, 1]) / 0.4).astype(int), 0, 199)
                 xmin, xmax = max(0, np.min(px_x) - 2), min(199, np.max(px_x) + 2)
@@ -143,84 +191,107 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, checkpoint_path=os.
                 if xmax <= xmin or ymax <= ymin:
                     continue
 
-                # Ritaglia la patch locale a 11 canali e la ridimensiona a risoluzione fissa 64x64
                 patch = input_tensor[:, ymin:ymax+1, xmin:xmax+1]
                 patch_res = F.interpolate(patch.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).squeeze(0)
-                
-                # Vettore dei 9 scalari fisici e semantici (area, distanza, larghezza, lunghezza, asfalto, marciapiede, strisce, parcheggio, terreno)
-                scalars = torch.tensor([area, dist, 2.0, 1.8, road_f, side_f, cross_f, 0.0, terr_f], dtype=torch.float32)
-                target = torch.tensor(gt_neuro_6, dtype=torch.float32)
+
+                # Calcolo larghezza e lunghezza effettive del varco dell'ombra tramite OBB
+                if sp.is_valid and sp.area > 0.01:
+                    mrr = sp.minimum_rotated_rectangle
+                    mrr_coords = np.array(mrr.exterior.coords)[:-1]
+                    e1 = np.linalg.norm(mrr_coords[0] - mrr_coords[1])
+                    e2 = np.linalg.norm(mrr_coords[1] - mrr_coords[2])
+                    obb_w, obb_l = float(min(e1, e2)), float(max(e1, e2))
+                else:
+                    obb_w, obb_l = 0.5, 0.5
+
+                scalars = torch.tensor([area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f], dtype=torch.float32)
+                target = torch.tensor(gt_target, dtype=torch.float32)
 
                 patches_list.append(patch_res)
                 scalars_list.append(scalars)
                 targets_list.append(target)
 
-        # Converte le liste in tensori PyTorch unificati
         patches = torch.stack(patches_list)
         scalars = torch.stack(scalars_list)
         targets = torch.stack(targets_list)
-        # Salva la cache su disco per non dover ricalcolare i ritagli nei successivi avvii
-        torch.save({"patches": patches, "scalars": scalars, "targets": targets}, cache_path)
-        print(f"Cache salvata in: {cache_path}")
 
-    # Creazione del Dataset PyTorch e del DataLoader con mescolamento casuale (shuffle=True)
+        if gt_mode != "positives_only":
+            torch.save({"patches": patches, "scalars": scalars, "targets": targets}, cache_path)
+            print(f"• Cache salvata in: {cache_path}")
+
+    # DataLoader
     dataset = TensorDataset(patches, scalars, targets)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
-    print(f"Campioni Totali: {len(dataset)} | Batches per Epoca: {len(dataloader)}")
+    print(f"• Campioni Totali: {len(dataset)} | Batches per Epoca: {len(dataloader)}")
 
-    # Inizializzazione del Modello Neurale AttentionPerZoneModel su GPU
+    # Inizializzazione del Modello AttentionPerZoneModel
     model = AttentionPerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(device)
-    # Funzione di costo Asymmetric Loss (gamma_neg=4.0 per schiacciare i falsi allarmi, clip=0.05 per margin shift)
-    criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=1.0, clip=0.05)
-    # Ottimizzatore AdamW con regolarizzazione Weight Decay per evitare l'overfitting
+
+    # Funzione di costo Asymmetric Loss Bilanciata (gamma_pos=0.5 per compromesso ideale Recall/Precision)
+    # Evita l'ipersensibilità e abbatte i falsi positivi mantenendo altissima la copertura
+    if gt_mode in ["real", "positives_only"]:
+        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05, pos_weights=[1.5, 2.5, 2.5, 2.0, 2.0, 2.5])
+    elif gt_mode == "hybrid":
+        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05, pos_weights=[1.2, 2.2, 2.0, 1.8, 1.8, 2.2])
+    else:
+        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    # Scheduler Cosine Annealing per ridurre dolcemente il Learning Rate fino all'ultima epoca
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
-    print(f"\nInizio Addestramento su GT Sintetica per {epochs} Epoche...\n")
+    print(f"\nInizio Addestramento [{gt_mode.upper()}] per {epochs} Epoche...\n")
     start_t = time.time()
-    # Imposta il modello in modalità addestramento (attiva Dropout e BatchNorm)
     model.train()
 
-    # Ciclo principale di Addestramento sulle 20 Epoche
     for epoch in range(epochs):
         epoch_loss = 0.0
         for p_b, s_b, t_b in dataloader:
-            # Trasferisce il batch di dati sulla memoria della GPU
             p_b, s_b, t_b = p_b.to(device), s_b.to(device), t_b.to(device)
-            
-            # 1. Azzera i gradienti accumulati nel passo precedente
             optimizer.zero_grad()
-            # 2. Forward Pass: calcola i logit predetti dal modello
             logits = model(p_b, s_b)
-            # 3. Calcolo dell'errore asimmetrico confrontando i logit con la Ground Truth
-            loss = criterion(logits, t_b)
-            # 4. Backward Pass: retropropagazione del gradiente lungo tutti i pesi della rete
+            loss = criterion(logits, t_b, s_b)
             loss.backward()
-            # 5. Ottimizzazione: aggiorna i pesi dei neuroni con AdamW
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            
             epoch_loss += loss.item() * len(p_b)
 
-        # Aggiorna il Learning Rate a fine epoca secondo la curva cosinusoidale
         scheduler.step()
         avg_loss = epoch_loss / len(dataset)
         cur_lr = scheduler.get_last_lr()[0]
         print(f"  [Epoca {epoch+1:2d}/{epochs}] ASL Loss: {avg_loss:.5f} | LR: {cur_lr:.6f}")
 
     elapsed = time.time() - start_t
-    print(f"\nAddestramento completato in {elapsed:.2f} secondi.")
-    
-    # Salva il dizionario completo del checkpoint (pesi addestrati, architettura, epoche e loss finale)
-    torch.save({
+    print(f"\nAddestramento [{gt_mode.upper()}] completato in {elapsed:.2f} secondi.")
+
+    ckpt_dict = {
         "model_state_dict": model.state_dict(),
-        "architecture": "AttentionPerZoneModel_NeuroGT",
+        "architecture": f"AttentionPerZoneModel_{gt_mode}",
         "epochs": epochs,
-        "final_loss": avg_loss
-    }, checkpoint_path)
-    print(f"Pesi salvati con successo in: {checkpoint_path}")
+        "final_loss": avg_loss,
+        "gt_mode": gt_mode,
+        "split": split
+    }
+    torch.save(ckpt_dict, checkpoint_path)
+    print(f"[OK] Pesi salvati con successo in: {checkpoint_path}")
+
+    # Se geometric, aggiorna anche il default del repository
+    if gt_mode == "geometric":
+        default_ckpt = os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro.pth")
+        torch.save(ckpt_dict, default_ckpt)
+        print(f"[OK] Pesi standard aggiornati in: {default_ckpt}")
 
 
-# Blocco di esecuzione principale da terminale
 if __name__ == "__main__":
-    train_attention_neuro(epochs=20, batch_size=64)
+    import argparse
+    parser = argparse.ArgumentParser(description="Addestramento AttentionPerZoneModel su GT Sintetica o Reale")
+    parser.add_argument("--mode", "--gt_mode", dest="mode", type=str, default="hybrid",
+                        choices=["geometric", "semantic", "hybrid", "real", "positives_only", "all"],
+                        help="Modalità: 'geometric', 'semantic', 'hybrid', 'real', 'positives_only' o 'all' per addestrare tutti")
+    parser.add_argument("--epochs", type=int, default=20, help="Numero di epoche (default: 20)")
+    parser.add_argument("--batch_size", type=int, default=64, help="Dimensione del batch (default: 64)")
+    parser.add_argument("--split", type=str, default="train", choices=["train", "val", "all"],
+                        help="Split nuScenes: 'train' (8 scene, default), 'val' (2 scene) o 'all' (10 scene)")
+    parser.add_argument("--force", "--force_extract", dest="force", action="store_true", help="Forza la rigenerazione della cache dataset da zero")
+    args = parser.parse_args()
+
+    train_attention_neuro(epochs=args.epochs, batch_size=args.batch_size, gt_mode=args.mode, split=args.split, force_extract=args.force)

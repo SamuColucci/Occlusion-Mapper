@@ -38,3 +38,14 @@ Questo documento traccia in modo puntuale tutti i collegamenti, fallback legacy 
   * Snellire il file mantenendo solo la funzione di loss ufficiale dello stato dell'arte (`AsymmetricLoss`) con parametri ottimizzati ($\gamma_- = 4.0, \gamma_+ = 1.0, m = 0.05$).
 
 ---
+
+### 4. `architettura_neurale/per_zone_model.py`
+* **Righe**: 1 - 5 (e relativa cartella `.prove/per_zone_model.py`)
+* **Elemento Attuale**:
+  * File stub contenente solo `from .prove.per_zone_model import PerZoneModel` per retrocompatibilità con vecchi script di test preliminari.
+* **Cosa Cambiare in Futuro**:
+  * Eliminare il file `architettura_neurale/per_zone_model.py` e rimuovere `PerZoneModel` dall'`__init__.py` del modulo `architettura_neurale`.
+* **Motivazione / Perché**:
+  * Il modello ufficiale definitivo e certificato del progetto è esclusivamente `AttentionPerZoneModel` (definito in `architettura_neurale/attention_per_zone_model.py`). Mantenere lo stub di retrocompatibilità della vecchia baseline non è più necessario a sistema consolidato.
+
+---

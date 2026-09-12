@@ -26,13 +26,29 @@ from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
 from architettura_neurale.loss_functions import AsymmetricLoss
 
 
-def train_real_gt(epochs=20, batch_size=64, lr=1e-3, checkpoint_path=os.path.join("pesi_modelli", "_prove", "per_zone_checkpoint_attention_real_gt.pth")):
-    # Selezione automatica dell'acceleratore hardware: GPU CUDA (NVIDIA) se disponibile, altrimenti CPU
+def train_real_gt(epochs=20, batch_size=64, lr=1e-3, 
+                  checkpoint_path=None,
+                  mode="all"):
+    """
+    Addestramento su Ground Truth Reale nuScenes:
+      - mode='all': Addestra su tutte le 18.682 zone (con le zone vuote).
+      - mode='positives_only': Addestra ESCLUSIVAMENTE sulle 4.969 zone con ostacoli reali (esclude i vuoti).
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if checkpoint_path is None:
+        if mode == "positives_only":
+            checkpoint_path = os.path.join("pesi_modelli", "_prove", "per_zone_checkpoint_attention_positive_only.pth")
+        else:
+            checkpoint_path = os.path.join("pesi_modelli", "_prove", "per_zone_checkpoint_attention_real_gt.pth")
+
     print(f"\n===========================================================================")
-    print(f"   ADDESTRAMENTO MODELLO ATTENZIONE SU GROUND TRUTH REALE NUSCENES")
+    if mode == "positives_only":
+        print(f"   ADDESTRAMENTO GT REALE: MODALITÀ POSITIVES-ONLY (SOLE ZONE CON OSTACOLI)")
+    else:
+        print(f"   ADDESTRAMENTO ATTENTION SU GROUND TRUTH REALE NUSCENES (COMPLETO)")
     print(f"===========================================================================")
     print(f"Dispositivo Selezionato: {device}")
+    print(f"Modalità: {mode} | Checkpoint: {checkpoint_path}")
 
     # Percorso per il salvataggio dei tensori pre-elaborati con GT Reale in cache su disco
     cache_path = os.path.join("addestramento", "cached_dataset_per_zone.pth")
@@ -41,6 +57,13 @@ def train_real_gt(epochs=20, batch_size=64, lr=1e-3, checkpoint_path=os.path.joi
         print(f"Caricamento dataset con GT Reale dalla cache: {cache_path}...")
         cache_data = torch.load(cache_path)
         patches, scalars, targets = cache_data["patches"], cache_data["scalars"], cache_data["targets"]
+
+        if mode == "positives_only":
+            pos_mask = (targets.sum(dim=1) > 0)
+            print(f"• Filtraggio Positives-Only: conservate {int(pos_mask.sum())}/{len(targets)} zone con ostacoli reali.")
+            patches = patches[pos_mask]
+            scalars = scalars[pos_mask]
+            targets = targets[pos_mask]
     else:
         # Altrimenti, estrae e ritaglia tutti i campioni dal dataset nuScenes da zero
         print("Generazione dataset con etichette GT Reale dai fotogrammi...")
@@ -195,4 +218,12 @@ def train_real_gt(epochs=20, batch_size=64, lr=1e-3, checkpoint_path=os.path.joi
 
 # Blocco di esecuzione principale da terminale
 if __name__ == "__main__":
-    train_real_gt(epochs=20, batch_size=64)
+    import argparse
+    parser = argparse.ArgumentParser(description="Addestramento AttentionPerZoneModel su GT Reale")
+    parser.add_argument("--epochs", type=int, default=20, help="Numero di epoche")
+    parser.add_argument("--batch_size", type=int, default=64, help="Dimensione del batch")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--mode", type=str, default="all", choices=["all", "positives_only"], help="Modalita: 'all' (con zone vuote) o 'positives_only' (solo zone piene)")
+    args = parser.parse_args()
+
+    train_real_gt(epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, mode=args.mode)
