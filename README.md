@@ -1,195 +1,190 @@
-# Occlusion-Mapper: Stima Probabilistica e Apprendimento Neurale per la Percezione delle Zone Occluse nella Guida Autonoma
+# Occlusion-Mapper: Stima Neuro-Simbolica e Apprendimento Neurale per la Percezione delle Zone Occluse nella Guida Autonoma
 
-Repository ufficiale del progetto di Tesi di Laurea dedicato alla stima, modellazione probabilistica e inferenza neurale degli ostacoli nascosti nelle zone cieche sensoriali (occlusioni LiDAR) per veicoli a guida autonoma su dataset nuScenes.
+Repository ufficiale del progetto di Tesi di Laurea dedicato alla stima, modellazione probabilistica e inferenza neurale degli ostacoli nascosti nelle zone cieche sensoriali (occlusioni LiDAR) per veicoli a guida autonoma su dataset **nuScenes**.
 
 ---
 
 ## Panoramica della Pipeline
 
-Il sistema implementa una pipeline modulare in quattro fasi:
+I sensori fisici di bordo (LiDAR e telecamere) sono limitati alla linea di vista (*Line-of-Sight*, LoS). **Occlusion-Mapper** stima la presenza e la classe di ostacoli nascosti all'interno delle regioni d'ombra generate da altri veicoli o elementi urbani tramite una pipeline modulare in quattro fasi:
 
-1. **Raycasting LiDAR e Decomposizione Geometrica**: Simulazione del fascio LiDAR 3D in coordinate polar-grid per identificare i coni d'ombra generati da ostacoli ed elementi urbani. Le zone d'ombra vengono proiettate in coordinate Bird's Eye View (BEV) e scomposte in sotto-zone disgiunte in base all'ingombro geometrico (Oriented Bounding Box, OBB).
-2. **Stima Probabilistica Condizionata (Agente Bayesiano)**: Calcolo analitico della probabilita a priori condizionata $P(C_k \mid \text{Mappa HD}, W_{\text{sub}}, \text{Area})$ combinando i vincoli di transitabilita del codice della strada con il tracciamento della memoria storica tra fotogrammi consecutivi.
-3. **Apprendimento Neurale Multimodale (AttentionPerZoneModel)**: Modello neurale basato su un backbone convoluzionale residuo con meccanismo di Channel Attention (Squeeze-and-Excitation) per pesare dinamicamente gli 11 canali BEV, modulazione semantica FiLM (Feature-wise Linear Modulation) guidata dai vettori scalari della mappa HD, Layer Normalization e funzione di costo Asymmetric Loss (ASL) con disaccoppiamento dei gradienti.
-4. **Validazione a Doppia Ground Truth**: Valutazione comparativa condotta sia sulla Ground Truth Reale nuScenes (annotazioni 3D visibili) sia sulla Ground Truth Sintetica Neurosimbolica (che include i varchi plausibili e le affordance stradali).
+```
+[ Nuvola di Punti LiDAR 3D + HD-Map ]
+                 │
+                 ▼
+ 1. Space Carving & Raycasting 3D (Bird's-Eye-View a 11 canali)
+                 │
+                 ▼
+ 2. Decomposizione Poligonale & Filtri di Ammissibilità Fisica
+                 │
+                 ▼
+ 3. Modello Neurale Attention-per-Zone (AttentionPerZoneModel)
+    ├── Channel Attention (Squeeze-and-Excitation)
+    ├── Condizionamento Semantico FiLM (HD-Map vettoriale)
+    └── Maschere Logiche Determistiche (Altezza/Dimensioni Occludente)
+                 │
+                 ▼
+ 4. Valutazione Empirica Duale (GT Reale 3D vs. Affordance Geometrica)
+```
+
+1. **Raycasting LiDAR e Decomposizione Geometrica**: Simulazione del fascio LiDAR 3D in coordinate polari per identificare i coni d'ombra generati da veicoli e ostacoli. Le aree occluse vengono proiettate in coordinate *Bird's-Eye-View* (BEV) e ritagliate a livello di singola zona (*patch-per-zone*).
+2. **Descrittori Geometrici e Semantici (HD-Map)**: Calcolo dei descrittori scalari per ciascuna zona d'ombra (area, distanza dal veicolo ego, ingombro OBB, frazione di asfalto carrabile, marciapiede, attraversamento pedonale, banchina e terreno).
+3. **Inferenza Neurale Neuro-Simbolica (`AttentionPerZoneModel`)**:
+   - Backbone convoluzionale residuo su **11 canali BEV** (layer semantici HD-map, densità e altezza LiDAR, mappe d'ombra dinamiche e statiche).
+   - Meccanismo di **Channel Attention** (*Squeeze-and-Excitation*) per pesare dinamicamente la rilevanza dei canali.
+   - Modulazione multimodale **FiLM** (*Feature-wise Linear Modulation*) condizionata dai vettori scalari della mappa HD.
+   - **Maschere Logico-Simboliche di Compatibilità**: vincoli fisici differenziabili che azzerano a priori le classi impossibili (es. un camion non può nascondersi dietro un veicolo con altezza $< 1.50\,\text{m}$, un'auto non può trovarsi sul marciapiede).
+   - Funzione di costo **Asymmetric Loss (ASL)** con disaccoppiamento dei gradienti per contrastare l'estremo sbilanciamento delle classi.
+4. **Valutazione Comparativa Multi-Benchmark**:
+   - **1. GT Reale nuScenes (3D Box)**: Rilevamento stretto di ostacoli fisici effettivamente presenti e nascosti nell'ombra (escludendo il veicolo occludente stesso).
+   - **2. GT Ibrida / Geometrica (Affordance)**: Anticipazione preventiva dei varchi carrabili e delle traiettorie pedonali plausibili per pianificazione difensiva.
 
 ---
 
-## Struttura del Progetto
+## Struttura del Repository
 
 ```text
 Occlusion-Mapper/
-|-- architettura_neurale/       # Definizione AttentionPerZoneModel e loss functions (ASL)
-|-- pesi_modelli/               # Pesi addestrati del modello finale (.pth)
-|-- addestramento/              # Script di training su GPU
-|-- inferenza_agenti/           # Agenti di inferenza a bordo (Neurale e Bayesiano)
-|-- ground_truth/               # Estrattori Ground Truth Reale e Sintetica Neurosimbolica
-|-- raycaster/                  # Modulo di Raycasting LiDAR 3D polar-grid
-|-- dataset_adapter/            # Adapter per il dataset nuScenes e mappe HD
-|-- valutazione/                # Script di benchmark e calcolo metriche ufficiali
-|-- visualizzatori/             # Visualizzatori interattivi grafici runtime
-|-- documentazione/             # Note teoriche, tabelle e guide di esecuzione
-|-- estrazione_zone_occluse.py  # Script batch per l'estrazione dei coni d'ombra
-|-- verify_complete_pipeline.py # Script di diagnostica e verifica completa del sistema
-`-- requirements.txt            # Dipendenze Python
+├── architettura_neurale/       # AttentionPerZoneModel, FiLM, Channel Attention, ASL Loss
+├── pesi_modelli/               # Checkpoint addestrati (.pth) per le varie modalità
+├── addestramento/              # Script di training GPU (split official train/val)
+├── inferenza_agenti/           # Agenti di inferenza runtime (Neurale e Bayesiano)
+├── ground_truth/               # Estrattori GT Reale 3D e GT Sintetica Neurosimbolica
+├── raycaster/                  # Raycasting LiDAR 3D polar-grid e space carving
+├── dataset_adapter/            # Adapter nuScenes e parser mappe HD vettoriali
+├── valutazione/                # Benchmark ufficiale e calcolo metriche (404 frame)
+├── visualizzatori/             # Suite di visualizzatori interattivi runtime
+├── documentazione/             # Report di valutazione, immagini per tesi, tabelle
+├── estrazione_zone_occluse.py  # Script batch per l'estrazione delle zone d'ombra
+├── verify_complete_pipeline.py # Script di diagnostica e test di integrità
+└── requirements.txt            # Dipendenze Python
 ```
 
 ---
 
-## Istruzioni di Installazione ed Esecuzione
+## Installazione ed Esecuzione
 
 ### 1. Configurazione Ambiente
 ```bash
+# Creazione ambiente virtuale
 python -m venv .venv
-source .venv/bin/activate  # Su Windows: .\.venv\Scripts\Activate.ps1
+# Attivazione (Windows PowerShell)
+.\.venv\Scripts\Activate.ps1
+# Attivazione (Linux / macOS)
+source .venv/bin/activate
+
+# Installazione dipendenze
 pip install -r requirements.txt
 ```
 
 ### 2. Estrazione delle Zone d'Ombra LiDAR
+Estrae le geometrie dei coni d'ombra per tutte le scene del dataset:
 ```bash
 python estrazione_zone_occluse.py
 ```
 
-### 3. Addestramento del Modello
-L'addestramento ufficiale della rete neurale viene eseguito sulla **Ground Truth Sintetica Neurosimbolica**:
+### 3. Addestramento dei Modelli
+L'addestramento supporta gli split ufficiali nuScenes (`train`, `val`, `all`) e diverse modalità di supervisione:
 ```bash
-python addestramento/train_per_zone_attention.py
+# Addestramento modello con supervisione Solo Positivi (Positives-Only)
+python addestramento/train_per_zone_attention.py --gt-mode positives_only --split train
+
+# Addestramento modello con supervisione Sintetica Ibrida
+python addestramento/train_per_zone_attention.py --gt-mode hybrid --split train
+
+# Addestramento con supervisione Reale nuScenes completa
+python addestramento/train_per_zone_attention.py --gt-mode real --split train
 ```
 
-Per scopi di ricerca e confronto empirico (Ablation Study), e disponibile anche lo script di addestramento su sola **Ground Truth Reale nuScenes**:
+### 4. Valutazione Ufficiale e Benchmark
+Calcola le metriche complete (TP, FP, FN, TN, Precision, Recall, F1, Specificity) sui 404 frame (split `all`, `train` o `val`) con soglie decisionali calibrate:
 ```bash
-python addestramento/train_per_zone_real_gt.py
+# Valutazione completa su tutti i 404 frame
+python valutazione/evaluate_final_official.py --split all
+
+# Valutazione sullo split di validazione ufficiale nuScenes (scene-0103, scene-0916)
+python valutazione/evaluate_final_official.py --split val
 ```
 
-### 4. Valutazione e Benchmark su Dataset Completo
-* **Valutazione del Modello Ufficiale** (su entrambe le Ground Truth a 20m e 25m):
-  ```bash
-  python valutazione/evaluate_final_official.py
-  ```
-* **Confronto Comparativo di Ablazione** (Supervisione Reale vs Neurosimbolica):
-  ```bash
-  python valutazione/evaluate_training_supervision_ablation.py
-  ```
+---
 
-### 5. Visualizzatori Runtime Interattivi
+## Visualizzatori Interattivi Runtime
 
-Tutti i visualizzatori si trovano in `visualizzatori/`. Possono essere avviati singolarmente o affiancati al viewer nuScenes ufficiale tramite `avvia_entrambi.py`.
+Tutti i visualizzatori grafici si trovano nella cartella `visualizzatori/`. Possono essere eseguiti singolarmente o sincronizzati in parallelo con il viewer ufficiale nuScenes.
 
-**Avvio affiancato (sincronizzazione bidirezionale con nuScenes Explorer):**
+### Avvio Sincronizzato con nuScenes Explorer
 ```bash
-# Sintassi
-python visualizzatori/avvia_entrambi.py [frame] [--FLAG]
-
-python visualizzatori/avvia_entrambi.py 17               # raycasting (default)
-python visualizzatori/avvia_entrambi.py 17 --inputs       # input rete neurale
-python visualizzatori/avvia_entrambi.py 17 --neural       # inferenza neurale
-python visualizzatori/avvia_entrambi.py 17 --bayes        # probabilita bayesiana
-python visualizzatori/avvia_entrambi.py 17 --gt           # ground truth
-python visualizzatori/avvia_entrambi.py 17 --eval         # valutazione prestazioni
+# Sintassi: python visualizzatori/avvia_entrambi.py [frame] [--FLAG]
+python visualizzatori/avvia_entrambi.py 14 --eval         # Dashboard Valutazione Prestazioni
+python visualizzatori/avvia_entrambi.py 14 --neural       # Inferenza Neurale Live
+python visualizzatori/avvia_entrambi.py 14 --inputs       # Ispezione 11 Canali BEV + FiLM
+python visualizzatori/avvia_entrambi.py 14 --bayes        # Probabilità Bayesiana
+python visualizzatori/avvia_entrambi.py 14 --gt           # Ispezione Ground Truth
 ```
 
-**Avvio singolo:**
+### Avvio Singolo dei Moduli
 ```bash
-# Raycasting Occlusioni (mappa BEV con ombre, strutture statiche, icone)
-python visualizzatori/vis_raycasting_occlusioni.py [frame]
+# 1. Dashboard Valutazione Prestazioni (Figure 5c Tesi - Recap TRAIN vs VAL, KPI Cards, Metriche)
+python visualizzatori/vis_valutazione_prestazioni.py [frame]
 
-# Input Multimodali Rete Neurale - Figure 6 Tesi (11 canali BEV + Rete Ausiliaria MLP/FiLM)
-# Comandi: T/Spazio toggle ausiliaria, Z/X scorri zone, Click BEV ispeziona scalari, S salva HD
-python visualizzatori/vis_input_rete_neurale.py [frame]
-
-# Inferenza Neurale Live su GPU (TP/FP/FN/TN, barre probabilita, toggle GT con M/G)
+# 2. Inferenza Neurale Live su GPU (Confronto modelli: NEURO_SIMB, POS_ONLY, REAL_GT)
+# Comandi: M (cambia modello), G (cambia GT di confronto), Freccia Dx/Sx (frame)
 python visualizzatori/vis_inferenza_neurale.py [frame]
 
-# Probabilita Bayesiana Condizionata (approccio alternativo senza rete neurale)
-python visualizzatori/vis_probabilita_bayes.py [frame]
+# 3. Input Multimodali Rete Neurale (11 canali BEV + Scalari HD-Map + Sottorete FiLM)
+# Comandi: Spazio/T (toggle ausiliaria), Z/X (scorri zone), Click BEV (ispeziona)
+python visualizzatori/vis_input_rete_neurale.py [frame]
 
-# Ground Truth: confronto affiancato GT Reale vs GT Neurosimbolica
+# 4. Raycasting Occlusioni e Geometrie 3D
+python visualizzatori/vis_raycasting_occlusioni.py [frame]
+
+# 5. Confronto Ground Truth (Reale 3D vs. Sintetica Ibrida)
 python visualizzatori/vis_ground_truth_occlusioni.py [frame]
 
-# Dashboard Valutazione Prestazioni (metriche Precision/Recall/F1 sui 404 frame)
-python visualizzatori/vis_valutazione_prestazioni.py [frame]
+# 6. Agente Probabilistico Bayesiano Condizionato
+python visualizzatori/vis_probabilita_bayes.py [frame]
 ```
-
 
 ---
 
 ## Risultati Sperimentali
 
-La validazione e stata condotta su tutti i 404 fotogrammi del dataset nuScenes (oltre 18.000 zone d'ombra analizzate) utilizzando la soglia decisionale operativa standard ($0.30$).
+La validazione ufficiale è condotta sui **404 fotogrammi** del dataset nuScenes (oltre 18.000 zone d'ombra valutate), ripartiti secondo lo split ufficiale in **322 frame di Train** (8 scene) e **82 frame di Validation** (2 scene: `scene-0103` e `scene-0916`).
+
+### 1. Benchmark su Ground Truth Reale nuScenes (Rilevamento Ostacoli Fisici 3D Nascosti)
+Valuta la capacità di individuare gli ostacoli fisici reali celati nell'ombra (escludendo rigorosamente il veicolo occludente visibile):
+
+| Modello | Split | Recall Globale | Precision | F1-Score | Recall Auto | Recall Camion | Recall VRU | Note |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **`POS_ONLY`** | **VAL** | **83.3%** | **8.4%** | **15.2%** | 80.0% | 50.0% | **83.3%** | Neuro-simbolico su campioni puliti |
+| **`POS_ONLY`** | **TRAIN** | **78.4%** | **7.6%** | **13.9%** | 77.0% | 50.0% | **81.0%** | Zero overfitting |
+| **`NEURO_SIMB`** | **VAL** | 83.3% | 2.1% | 4.1% | 85.0% | 50.0% | 66.7% | Bias allarmista da etichette sintetiche |
+| **`REAL_GT`** | **VAL** | 75.0% | 8.8% | 15.8% | 75.0% | 0.0% | 66.7% | Sopprime classi a bassa prevalenza |
+
+> *Nota metodologica*: Nella GT Reale 3D la prevalenza degli ostacoli nascosti è solo del **1.5%** (489 ostacoli su oltre 32.000 valutazioni classe-zona). In questo scenario di sicurezza preventiva, il modello `POS_ONLY` intercetta **l'83.3% dei pedoni/ciclisti (VRU)** e l'**80% delle auto** con tempi di inferenza di soli **1.2 ms per zona**.
 
 ---
 
-### 1. Modello Ufficiale: Addestramento con Ground Truth Sintetica Neurosimbolica
+### 2. Benchmark su Ground Truth Geometrica / Affordance (Anticipazione del Rischio Preventivo)
+Valuta la capacità del modello di anticipare la transitabilità e il rischio spaziale secondo la mappa HD:
 
-Il modello ufficiale `AttentionPerZoneModel` viene addestrato su GT Sintetica Neurosimbolica (ostacoli fisici reali + affordance del codice della strada). Di seguito i risultati ottenuti nelle due modalita di test:
-
-#### A. Valutazione su Ground Truth Sintetica Neurosimbolica (Anticipazione del Rischio)
-Valuta la capacita del modello di anticipare sia gli ostacoli reali sia i varchi plausibili definiti dalla mappa HD:
-
-| Raggio | Categoria Semantica | TP | FP | FN | Precision (%) | Recall (%) | F1-Score (%) |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **20m** | Auto | 2.354 | 585 | 14 | 80.1% | 99.4% | **88.7%** |
-| | Camion / Bus | 1.159 | 402 | 0 | 74.2% | 100.0% | **85.2%** |
-| | VRU (Pedoni / Ciclisti) | 1.458 | 711 | 0 | 67.2% | 100.0% | **80.4%** |
-| | Barriere | 1.041 | 580 | 0 | 64.2% | 100.0% | **78.2%** |
-| | **Media Globale (20m)** | **6.012** | **2.278** | **14** | **72.5%** | **99.8%** | **84.0%** |
-| **25m** | Auto | 3.495 | 877 | 23 | 79.9% | 99.3% | **88.6%** |
-| | Camion / Bus | 1.751 | 617 | 0 | 73.9% | 100.0% | **85.0%** |
-| | VRU (Pedoni / Ciclisti) | 2.237 | 1.053 | 0 | 68.0% | 100.0% | **80.9%** |
-| | Barriere | 2.007 | 899 | 0 | 69.1% | 100.0% | **81.7%** |
-| | **Media Globale (25m)** | **9.490** | **3.446** | **23** | **73.4%** | **99.8%** | **84.5%** |
-
-#### B. Valutazione su Ground Truth Reale nuScenes (Rilevamento Ostacoli Fisici)
-Valuta l'accuratezza stretta rispetto ai soli ostacoli fisici reali visibili e annotati nei box 3D:
-
-| Raggio | Categoria Semantica | TP | FP | FN | Precision (%) | Recall (%) | F1-Score (%) |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **20m** | Auto | 1.362 | 1.577 | 0 | 46.3% | 100.0% | **63.3%** |
-| | VRU (Pedoni / Ciclisti) | 687 | 1.482 | 0 | 31.7% | 100.0% | **48.1%** |
-| | Barriere | 509 | 1.112 | 0 | 31.4% | 100.0% | **47.8%** |
-| | Camion / Bus | 427 | 1.134 | 0 | 27.4% | 100.0% | **43.0%** |
-| | **Media Globale (20m)** | **2.985** | **5.305** | **0** | **36.0%** | **100.0%** | **52.9%** |
-| **25m** | Auto | 1.894 | 2.478 | 0 | 43.3% | 100.0% | **60.5%** |
-| | VRU (Pedoni / Ciclisti) | 957 | 2.333 | 0 | 29.1% | 100.0% | **45.1%** |
-| | Barriere | 665 | 2.241 | 0 | 22.9% | 100.0% | **37.2%** |
-| | Camion / Bus | 588 | 1.780 | 0 | 24.8% | 100.0% | **39.8%** |
-| | **Media Globale (25m)** | **4.104** | **8.832** | **0** | **31.7%** | **100.0%** | **48.2%** |
+| Modello | Split | Recall | Precision | F1-Score | Specificity |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **`POS_ONLY`** | **VAL** | **77.8%** | **49.8%** | **60.9%** | **87.2%** |
+| **`POS_ONLY`** | **TRAIN** | **89.5%** | **53.9%** | **67.3%** | **88.6%** |
+| **`NEURO_SIMB`** | **VAL** | 99.8% | 34.2% | 50.9% | 41.5% |
 
 ---
 
-### 2. Modello Baseline: Addestramento con Ground Truth Reale nuScenes (Ablation Study)
-
-Il modello baseline viene addestrato utilizzando unicamente i box 3D fisicamente annotati da nuScenes (senza regole semantiche di affordance):
-
-#### A. Valutazione su Ground Truth Reale nuScenes (a 25m)
-| Categoria Semantica | TP | FP | FN | Precision (%) | Recall (%) | F1-Score (%) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| Auto | 1.878 | 384 | 16 | 83.0% | 99.2% | **90.4%** |
-| Camion / Bus | 586 | 205 | 2 | 74.1% | 99.7% | **85.0%** |
-| VRU (Pedoni / Ciclisti) | 925 | 244 | 32 | 79.1% | 96.7% | **87.0%** |
-| Barriere | 663 | 104 | 2 | 86.4% | 99.7% | **92.6%** |
-| **Media Globale (25m)** | **4.052** | **937** | **52** | **81.2%** | **98.7%** | **89.1%** |
-
-#### B. Valutazione su Ground Truth Sintetica Neurosimbolica (a 25m)
-| Categoria Semantica | TP | FP | FN | Precision (%) | Recall (%) | F1-Score (%) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| Auto | 1.959 | 303 | 1.559 | 86.6% | 55.7% | **67.8%** |
-| Camion / Bus | 604 | 187 | 1.147 | 76.4% | 34.5% | **47.5%** |
-| VRU (Pedoni / Ciclisti) | 978 | 191 | 1.259 | 83.7% | 43.7% | **57.4%** |
-| Barriere | 677 | 90 | 1.330 | 88.3% | 33.7% | **48.8%** |
-| **Media Globale (25m)** | **4.218** | **771** | **5.295** | **84.5%** | **44.3%** | **58.2%** |
+## Requisiti di Sistema
+* Python $\ge$ 3.9
+* PyTorch $\ge$ 2.0 (supporto CUDA consigliato)
+* nuScenes devkit (`nuscenes-devkit`)
+* Shapely, OpenCV, NumPy, Matplotlib, SciPy
 
 ---
 
-### 3. Tabella Comparativa di Ablation Study (a 25 Metri)
-
-| Addestramento Effettuato con | Valutazione Test su | Precision (%) | Recall (%) | F1-Score (%) | Falsi Negativi (Pericoli Persi) |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **Ground Truth Reale nuScenes** *(Baseline)* | GT Reale nuScenes | 81.2% | 98.7% | 89.1% | 52 |
-| **Ground Truth Reale nuScenes** *(Baseline)* | GT Sintetica Neurosimbolica | 84.5% | 44.3% | 58.2% | **5.295** *(Crollo sicurezza)* |
-| **Ground Truth Sintetica Neurosimbolica** *(Ufficiale)* | GT Reale nuScenes | 31.7% | **100.0%** | 48.2% | **0** *(Zero ostacoli reali persi)* |
-| **Ground Truth Sintetica Neurosimbolica** *(Ufficiale)* | GT Sintetica Neurosimbolica | 73.4% | **99.8%** | **84.5%** | **23** *(Massima anticipazione)* |
-
-* **Evidenze Scientifiche**:
-  * L'addestramento su **Ground Truth Reale** produce un modello miope che sopprime le allerte sulle zone d'ombra apparentemente vuote, mancando il **55.7%** dei pericoli potenziali (5.295 punti ciechi pericolosi ignorati).
-  * L'addestramento su **Ground Truth Sintetica Neurosimbolica** abilita la guida difensiva (**Recall al 99.8%** sui varchi a rischio) azzerando i falsi negativi sugli ostacoli fisici reali (**Recall al 100.0%**).
+## Citazione e Crediti
+Progetto sviluppato presso il **Dipartimento di Informatica**, **Università degli Studi di Salerno**.  
+Candidato: *Samuele Colucci*  
+Dataset: *nuScenes by Motional* (Holger Caesar et al.).
