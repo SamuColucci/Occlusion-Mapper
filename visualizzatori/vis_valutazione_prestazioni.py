@@ -42,7 +42,8 @@ from raycaster.ray_caster import RayCaster
 from ground_truth.ground_truth_extractor import (
     extract_ground_truth_masks,
     rasterize_polygon,
-    get_occlusion_ground_truth_target
+    get_occlusion_ground_truth_target,
+    extract_real_occlusion_ground_truth
 )
 from ground_truth.ground_truth_extractor_synthetic import compute_synthetic_ground_truth
 from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
@@ -149,6 +150,27 @@ class EvaluationDashboardVisualizer:
         self.current_model_key = "NEURO_SIMB" if initial_model.upper() in ["HYBRID", "NEURO_SIMB"] else initial_model.upper()
         self.current_gt_key = "NEURO_SIMB" if initial_gt.upper() in ["HYBRID", "NEURO_SIMB"] else initial_gt.upper()
 
+        # Split standard nuScenes mini (train vs val inedito)
+        from nuscenes.utils.splits import create_splits_scenes
+        splits_dict = create_splits_scenes()
+        self.train_scenes = set(splits_dict.get('mini_train', []))
+        self.val_scenes = set(splits_dict.get('mini_val', []))
+
+        self.train_indices = []
+        self.val_indices = []
+        for i in range(self.total_frames):
+            s = self.adapter.all_samples[i]
+            sc = self.adapter.nusc.get('scene', s['scene_token'])['name']
+            if sc in self.val_scenes:
+                self.val_indices.append(i)
+            else:
+                self.train_indices.append(i)
+
+        self.nav_val_only = False
+
+        # Caricamento cache di valutazione ufficiale (se non presente la genera in automatico)
+        self.eval_cache = self._load_or_generate_eval_cache()
+
         # Stato per finestra di confronto 1-a-1 e visualizzazione errori
         self.fig_cmp = None
         self.cmp_model_a_key = self.current_model_key
@@ -156,6 +178,12 @@ class EvaluationDashboardVisualizer:
         self.cmp_gt_key = self.current_gt_key
         self.cmp_txt_frame = None
         self.highlight_fn = False
+
+        # Stato per finestra recap globale TRAIN vs VAL
+        self.fig_recap = None
+        self.recap_model_key = self.current_model_key
+        self.recap_gt_key = self.current_gt_key
+        self.recap_ui_buttons = []
 
         # Setup stile tipografico accademico
         plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica']
@@ -186,6 +214,57 @@ class EvaluationDashboardVisualizer:
         self.sync_timer = self.fig.canvas.new_timer(interval=150)
         self.sync_timer.add_callback(self.check_sync_file)
         self.sync_timer.start()
+
+    def _load_or_generate_eval_cache(self):
+        """Carica la cache di valutazione JSON precalcolata; se non esiste, la genera invocando evaluate_final_official.py."""
+        cache_path = os.path.join(ROOT_DIR, "valutazione", "cache_valutazione_ufficiale.json")
+        if not os.path.exists(cache_path):
+            cache_path = os.path.join(ROOT_DIR, "valutazione", "cache_valutazione_all.json")
+
+        if not os.path.exists(cache_path):
+            print("\n" + "=" * 80)
+            print(" [CACHE NON TROVATA]: Generazione automatica cache con evaluate_final_official.py...")
+            print("=" * 80)
+            eval_script = os.path.join(ROOT_DIR, "valutazione", "evaluate_final_official.py")
+            try:
+                import subprocess
+                subprocess.run([sys.executable, eval_script, "--mode", "all", "--split", "all"], check=True)
+                cache_path = os.path.join(ROOT_DIR, "valutazione", "cache_valutazione_ufficiale.json")
+            except Exception as e:
+                print(f"[ERRORE GENERAZIONE CACHE]: {e}")
+                return None
+
+        if os.path.exists(cache_path):
+            try:
+                cache_mtime = os.path.getmtime(cache_path)
+                # Verifica se qualche checkpoint in pesi_modelli è più recente della cache
+                newer_ckpts = []
+                for m_k, cfg in MODEL_CONFIGS.items():
+                    ckpt = cfg.get("ckpt")
+                    if ckpt:
+                        p = os.path.join(ROOT_DIR, ckpt) if not os.path.isabs(ckpt) else ckpt
+                        if os.path.exists(p) and os.path.getmtime(p) > cache_mtime:
+                            newer_ckpts.append(os.path.basename(p))
+
+                if newer_ckpts:
+                    print("\n" + "!" * 80)
+                    print(f" [AVVISO PESI AGGIORNATI]: I seguenti modelli sono più recenti della cache:")
+                    for c in set(newer_ckpts):
+                        print(f"   - {c}")
+                    print(" Per ricalcolare il benchmark con i nuovi pesi esegui:")
+                    print("   python valutazione/evaluate_final_official.py --mode all --split all")
+                    print(" Oppure elimina cache_valutazione_ufficiale.json per rigenerarla all'avvio.")
+                    print("!" * 80 + "\n")
+
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                num_frames = len(data.get("frames", {}))
+                print(f"• Cache Valutazione caricata: {num_frames} fotogrammi memorizzati da {os.path.basename(cache_path)}")
+                return data
+            except Exception as e:
+                print(f"[ATTENZIONE] Impossibile leggere la cache: {e}")
+                return None
+        return None
 
     def _preload_model(self, model_key):
         if model_key == "BAYES":
@@ -321,7 +400,101 @@ class EvaluationDashboardVisualizer:
             self.render_comparison_window()
 
     def evaluate_frame(self, model_key, gt_key):
-        """Esegue l'inferenza e calcola le metriche complete per qualsiasi combinazione modello/GT."""
+        """Restituisce le metriche e le zone inferite leggendo dalla cache ufficiale o calcolando come fallback."""
+        model_k = "NEURO_SIMB" if model_key in ["HYBRID", "NEURO_SIMB"] else model_key
+        gt_k = "NEURO_SIMB" if gt_key in ["HYBRID", "NEURO_SIMB"] else gt_key
+
+        start_time = time.perf_counter()
+
+        # 1. LETTURA DIRETTA DALLA CACHE UFFICIALE PRECALCOLATA
+        if self.eval_cache and "frames" in self.eval_cache:
+            frames_cache = self.eval_cache["frames"]
+            f_data = frames_cache.get(str(self.current_idx))
+            if f_data and "models" in f_data:
+                m_cache = f_data["models"].get(model_k)
+                if m_cache and gt_k in m_cache:
+                    cached_eval = m_cache[gt_k]
+                    raw_stats = cached_eval.get("stats", {})
+                    frame_stats = {
+                        int(c): raw_stats.get(str(c), {"tp": 0, "fp": 0, "fn": 0, "gt_count": 0, "pred_count": 0})
+                        for c in range(4)
+                    }
+                    f1 = float(cached_eval.get("f1", 0.0))
+                    rec = float(cached_eval.get("recall", 0.0))
+                    prec = float(cached_eval.get("precision", 0.0))
+                    cached_zones = cached_eval.get("zones", [])
+
+                    occ_file = os.path.join("extracted_occlusions", f"{self.sample_token}.json")
+                    occs = []
+                    if os.path.exists(occ_file):
+                        with open(occ_file, "r") as f:
+                            d = json.load(f)
+                            occs = d.get("occlusions", []) if isinstance(d, dict) else d
+
+                    circle_25m = Point(0, 0).buffer(self.max_range - 0.4)
+                    inferred = []
+                    for cz in cached_zones:
+                        occ_idx = cz["occ_idx"]
+                        if occ_idx >= len(occs):
+                            continue
+                        occ = occs[occ_idx]
+                        pts = occ.get("polygon_points_m", [])
+                        pts_np = np.array(pts)
+                        if len(pts_np) < 3:
+                            continue
+                        poly_xy = pts_np[:, :2]
+                        sp = ShapelyPolygon(poly_xy)
+                        if not sp.is_valid or sp.area <= 0.01:
+                            continue
+                        poly_vis = sp.intersection(circle_25m)
+                        if poly_vis.is_empty or poly_vis.area < 0.02:
+                            continue
+
+                        if poly_vis.geom_type == 'Polygon':
+                            poly_main = poly_vis
+                        elif poly_vis.geom_type in ['MultiPolygon', 'GeometryCollection']:
+                            polys = [g for g in poly_vis.geoms if g.geom_type == 'Polygon']
+                            poly_main = max(polys, key=lambda g: g.area) if polys else sp
+                        else:
+                            poly_main = sp
+
+                        pt = poly_main.representative_point()
+                        cx_m, cy_m = float(pt.x), float(pt.y)
+
+                        pred_b = cz["pred_binary"]
+                        gt_b = cz["gt_target_4"]
+                        z_tps = [c for c in range(4) if pred_b[c] == 1 and gt_b[c] == 1]
+                        z_fps = [c for c in range(4) if pred_b[c] == 1 and gt_b[c] == 0]
+                        z_fns = [c for c in range(4) if pred_b[c] == 0 and gt_b[c] == 1]
+
+                        inferred.append({
+                            "occ": occ,
+                            "poly_xy": poly_xy,
+                            "center": (cx_m, cy_m),
+                            "area": float(occ.get("area_sqm", sp.area)),
+                            "dist": float(occ.get("distance_m", np.hypot(cx_m, cy_m))),
+                            "road_f": float(occ.get("road_fraction", 0.0)),
+                            "side_f": float(occ.get("sidewalk_fraction", 0.0)),
+                            "cross_f": float(occ.get("crosswalk_fraction", 0.0)),
+                            "roadside_f": float(occ.get("roadside_fraction", 0.0)),
+                            "min_d_road": 0.0,
+                            "probs_4": cz["probs_4"],
+                            "pred_binary": pred_b,
+                            "gt_target_4": gt_b,
+                            "pred_class": cz["pred_class"],
+                            "pred_idx": cz["pred_idx"],
+                            "risk_score": cz["risk_score"],
+                            "verdict": cz["verdict"],
+                            "verdict_label": cz["verdict_label"],
+                            "zone_tps": z_tps,
+                            "zone_fps": z_fps,
+                            "zone_fns": z_fns
+                        })
+
+                    latency = (time.perf_counter() - start_time) * 1000.0
+                    return inferred, frame_stats, latency, f1, rec, prec
+
+        # 2. FALLBACK: Calcolo dinamico sul modello
         model = self._preload_model(model_key)
         if model is None:
             return [], {c: {"tp":0,"fp":0,"fn":0,"gt_count":0,"pred_count":0} for c in range(4)}, 0.0, 0.0, 0.0, 0.0
@@ -374,9 +547,17 @@ class EvaluationDashboardVisualizer:
             c: {"tp": 0, "fp": 0, "fn": 0, "gt_count": 0, "pred_count": 0}
             for c in range(4)
         }
-        thresholds = [0.25, 0.20, 0.25, 0.25]
+        thresholds = [0.28, 0.25, 0.25, 0.26]
         cat_names_4 = ["Auto", "Camion/Bus", "VRU (Pedoni)", "Barriere"]
         inferred = []
+
+        # Mappa rapida per estrarre le dimensioni 3D dell'occludore se noto
+        boxes_by_token = {b.token: b for b in self.frame_data.get('boxes', [])}
+        for sb in getattr(self, 'static_boxes', []):
+            boxes_by_token[sb.token] = sb
+
+        all_frame_boxes = self.frame_data.get('boxes', [])
+        occluder_tokens = {occ.get('object_token') for occ in occs if occ.get('object_token')}
 
         for occ_idx, occ in enumerate(occs):
             dist = float(occ.get("distance_m", 0.0))
@@ -397,6 +578,21 @@ class EvaluationDashboardVisualizer:
             if poly_vis.is_empty or poly_vis.area < 0.02:
                 continue
 
+            occ_name = occ.get('object_name', None)
+            occ_tok = occ.get('object_token', None)
+            b_obj = boxes_by_token.get(occ_tok, None)
+            if b_obj is not None:
+                if hasattr(b_obj, 'wlh'):
+                    occ_wlh = b_obj.wlh
+                elif hasattr(b_obj, 'max_x'):
+                    occ_wlh = [b_obj.max_x - b_obj.min_x, b_obj.max_y - b_obj.min_y, b_obj.max_z - b_obj.min_z]
+                else:
+                    occ_wlh = None
+                if not occ_name and hasattr(b_obj, 'name'):
+                    occ_name = b_obj.name
+            else:
+                occ_wlh = None
+
             occ_mask = rasterize_polygon(pts)
             tot = np.sum(occ_mask)
             road_f = np.sum(occ_mask * drivable_mask) / tot if tot > 0 else 0
@@ -408,28 +604,35 @@ class EvaluationDashboardVisualizer:
             min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
             roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
 
-            gt_raw_6 = get_occlusion_ground_truth_target(target_masks, pts)
-
             if gt_key == "REAL":
-                gt_target_4 = to_macro_classes_4(gt_raw_6)
-            elif gt_key == "GEOMETRIC":
-                gt_geom_6, _ = compute_synthetic_ground_truth(
-                    sp=sp, road_f=road_f, side_f=side_f, cross_f=cross_f,
-                    area=area, dist=dist, gt_raw_6=gt_raw_6, mode="geometric"
+                gt_raw_6, gt_target_4 = extract_real_occlusion_ground_truth(
+                    all_frame_boxes, sp, occluder_tokens=occluder_tokens
                 )
-                gt_target_4 = to_macro_classes_4(gt_geom_6)
-            elif gt_key == "SEMANTIC":
-                gt_sem_6, _ = compute_synthetic_ground_truth(
-                    sp=sp, road_f=road_f, side_f=side_f, cross_f=cross_f,
-                    area=area, dist=dist, gt_raw_6=gt_raw_6, mode="semantic"
-                )
-                gt_target_4 = to_macro_classes_4(gt_sem_6)
             else:
-                gt_hyb_6, _ = compute_synthetic_ground_truth(
-                    sp=sp, road_f=road_f, side_f=side_f, cross_f=cross_f,
-                    roadside_f=roadside_f, area=area, dist=dist, gt_raw_6=gt_raw_6, mode="hybrid"
+                gt_raw_6, _ = extract_real_occlusion_ground_truth(
+                    all_frame_boxes, sp, occluder_tokens=occluder_tokens
                 )
-                gt_target_4 = to_macro_classes_4(gt_hyb_6)
+                if gt_key == "GEOMETRIC":
+                    gt_geom_6, _ = compute_synthetic_ground_truth(
+                        sp=sp, road_f=road_f, side_f=side_f, cross_f=cross_f,
+                        area=area, dist=dist, gt_raw_6=gt_raw_6, mode="geometric",
+                        occluder_name=occ_name, occluder_wlh=occ_wlh, use_occluder_filter=True
+                    )
+                    gt_target_4 = to_macro_classes_4(gt_geom_6)
+                elif gt_key == "SEMANTIC":
+                    gt_sem_6, _ = compute_synthetic_ground_truth(
+                        sp=sp, road_f=road_f, side_f=side_f, cross_f=cross_f,
+                        area=area, dist=dist, gt_raw_6=gt_raw_6, mode="semantic",
+                        occluder_name=occ_name, occluder_wlh=occ_wlh, use_occluder_filter=True
+                    )
+                    gt_target_4 = to_macro_classes_4(gt_sem_6)
+                else:
+                    gt_hyb_6, _ = compute_synthetic_ground_truth(
+                        sp=sp, road_f=road_f, side_f=side_f, cross_f=cross_f,
+                        roadside_f=roadside_f, area=area, dist=dist, gt_raw_6=gt_raw_6, mode="hybrid",
+                        occluder_name=occ_name, occluder_wlh=occ_wlh, use_occluder_filter=True
+                    )
+                    gt_target_4 = to_macro_classes_4(gt_hyb_6)
 
             if model_key == "BAYES":
                 b_occ = bayes_occs[occ_idx] if occ_idx < len(bayes_occs) else {}
@@ -461,8 +664,9 @@ class EvaluationDashboardVisualizer:
 
                 scalars = torch.tensor([[area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]], dtype=torch.float32).to(self.device)
 
+                occluder_mask = AttentionPerZoneModel.build_compatibility_mask(occ_name, occ_wlh, device=self.device)
                 with torch.no_grad():
-                    logits = model(patch_res, scalars)
+                    logits = model(patch_res, scalars, occluder_mask=occluder_mask)
                     out_6 = torch.sigmoid(logits).squeeze(0).cpu().numpy()
 
                 p4 = [
@@ -484,18 +688,21 @@ class EvaluationDashboardVisualizer:
                 elif pred_binary[c] == 1 and gt_target_4[c] == 0: frame_stats[c]["fp"] += 1
                 elif pred_binary[c] == 0 and gt_target_4[c] == 1: frame_stats[c]["fn"] += 1
 
-            if len(zone_tps) > 0:
+            if len(zone_tps) > 0 and len(zone_fns) == 0:
                 verdict = "TP"
                 verdict_label = f"TRUE POSITIVE ({CAT_NAMES_4[zone_tps[0]]})"
+            elif len(zone_tps) > 0 and len(zone_fns) > 0:
+                verdict = "TP/FN"
+                verdict_label = f"PARZIALE: TP ({', '.join(CAT_NAMES_4[c] for c in zone_tps)}) + FN ({', '.join(CAT_NAMES_4[c] for c in zone_fns)})"
             elif len(zone_fns) > 0 and len(zone_fps) == 0:
+                verdict = "FN"
+                verdict_label = f"FALSE NEGATIVE ({CAT_NAMES_4[zone_fns[0]]})"
+            elif len(zone_fns) > 0 and len(zone_fps) > 0:
                 verdict = "FN"
                 verdict_label = f"FALSE NEGATIVE ({CAT_NAMES_4[zone_fns[0]]})"
             elif len(zone_fps) > 0 and len(zone_fns) == 0:
                 verdict = "FP"
                 verdict_label = f"FALSE POSITIVE ({CAT_NAMES_4[zone_fps[0]]})"
-            elif len(zone_fns) > 0 and len(zone_fps) > 0:
-                verdict = "FN"
-                verdict_label = f"FALSE NEGATIVE ({CAT_NAMES_4[zone_fns[0]]})"
             else:
                 verdict = "TN"
                 verdict_label = "TRUE NEGATIVE (Zona Libera)"
@@ -652,9 +859,25 @@ class EvaluationDashboardVisualizer:
             pred_objs = [short_names[c] for c in range(4) if pred_binary[c] == 1]
             pred_short = "+".join(pred_objs) if pred_objs else "Nessuno"
 
-            if verdict == "TP":
+            has_fn = len(zone_fns) > 0
+            is_fn_mode = (self.highlight_fn and has_fn) or (verdict == "FN")
+
+            if is_fn_mode:
+                missed_classes = [short_names[c] for c in zone_fns]
+                missed_str = "+".join(missed_classes) if missed_classes else (short_names[zone_fns[0]] if zone_fns else "FN")
                 if self.highlight_fn:
-                    fc, ec, alpha_fill, lw = '#10B981', '#047857', 0.25, 1.2
+                    # Evidenziazione speciale Falsi Negativi (colore vivo, target ring e alone)
+                    fc, ec, alpha_fill, lw = '#F43F5E', '#9F1239', 0.65, 2.6
+                    b_bg = '#881337'
+                    b_lbl = f"⚠ FN: {missed_str}"
+                else:
+                    fc, ec, alpha_fill, lw = '#A78BFA', '#7C3AED', 0.40, 1.8
+                    b_bg = '#6D28D9'
+                    b_lbl = f"FN: {missed_str}"
+                eff_cls = missed_classes[0] if missed_classes else (real_objs[0] if real_objs else pred_cls)
+            elif verdict in ["TP", "TP/FN"]:
+                if self.highlight_fn:
+                    fc, ec, alpha_fill, lw = '#10B981', '#047857', 0.15, 0.9
                     b_bg, b_lbl = '#059669', "TP"
                 else:
                     fc, ec, alpha_fill, lw = '#10B981', '#047857', 0.42, 1.6
@@ -662,74 +885,78 @@ class EvaluationDashboardVisualizer:
                 eff_cls = pred_cls
             elif verdict == "FP":
                 if self.highlight_fn:
-                    fc, ec, alpha_fill, lw = '#EF4444', '#B91C1C', 0.18, 0.8
+                    fc, ec, alpha_fill, lw = '#EF4444', '#B91C1C', 0.12, 0.7
                     b_bg, b_lbl = '#DC2626', "FP"
                 else:
                     fc, ec, alpha_fill, lw = '#EF4444', '#B91C1C', 0.38, 1.6
                     b_bg, b_lbl = '#DC2626', "FP"
                 eff_cls = pred_cls
-            elif verdict == "FN":
-                if self.highlight_fn:
-                    # Evidenziazione speciale Falsi Negativi (colore vivo e target ring)
-                    fc, ec, alpha_fill, lw = '#F43F5E', '#9F1239', 0.65, 2.6
-                    b_bg = '#881337'
-                    b_lbl = "⚠ FN"
-                else:
-                    fc, ec, alpha_fill, lw = '#A78BFA', '#7C3AED', 0.38, 1.8
-                    b_bg = '#6D28D9'
-                    b_lbl = "FN"
-                eff_cls = real_objs[0] if real_objs else pred_cls
             else:
-                fc, ec, alpha_fill, lw = '#E2E8F0', '#94A3B8', 0.08 if self.highlight_fn else 0.18, 0.6
+                fc, ec, alpha_fill, lw = '#E2E8F0', '#94A3B8', 0.05 if self.highlight_fn else 0.18, 0.5
                 b_bg, b_lbl = '#64748B', "TN"
                 eff_cls = pred_cls
 
             poly_patch = MplPolygon(poly_xy, closed=True, facecolor=fc, edgecolor=ec,
                                     linewidth=lw, alpha=alpha_fill,
-                                    linestyle='--' if (verdict == "FN") else '-',
-                                    zorder=6 if (self.highlight_fn and verdict == "FN") else 5)
+                                    linestyle='--' if is_fn_mode else '-',
+                                    zorder=10 if is_fn_mode else 5)
             ax.add_patch(poly_patch)
 
-            if dist_c <= 24.8 and abs(cx) <= 24.8 and abs(cy) <= 24.8 and verdict in ["TP", "FP", "FN"]:
-                if eff_cls == "Auto":
-                    icon_k = 'car_red' if verdict in ["FP", "FN"] else 'car_blue'
-                    self.draw_icon_object(ax, icon_k, center=[cx, cy], length=4.0, deg=0.0)
-                    h_off = 2.4
-                elif eff_cls == "Camion/Bus":
-                    icon_k = 'truck_red' if verdict in ["FP", "FN"] else 'truck_purple'
-                    self.draw_icon_object(ax, icon_k, center=[cx, cy], length=5.5, deg=0.0)
-                    h_off = 3.1
-                elif "VRU" in eff_cls:
-                    icon_k = 'pedestrian_red' if verdict in ["FP", "FN"] else 'pedestrian_green'
-                    self.draw_icon_object(ax, icon_k, center=[cx, cy], length=2.8, deg=0.0,
-                                          halo_color='#FEE2E2' if verdict in ["FP", "FN"] else '#DCFCE7', halo_radius=1.5)
-                    h_off = 1.8
-                else:
-                    icon_k = 'barrier_red' if verdict in ["FP", "FN"] else 'barrier_hazard'
-                    self.draw_icon_object(ax, icon_k, center=[cx, cy], length=2.2, deg=0.0)
-                    h_off = 1.5
+            if dist_c <= 24.8 and abs(cx) <= 24.8 and abs(cy) <= 24.8 and (verdict in ["TP", "FP", "FN", "TP/FN"] or is_fn_mode):
+                if is_fn_mode:
+                    # In modalità FN disegna l'icona dell'ostacolo MANCATO in rosso
+                    if eff_cls == "Auto":
+                        self.draw_icon_object(ax, 'car_red', center=[cx, cy], length=4.0, deg=0.0)
+                        h_off = 2.4
+                    elif eff_cls in ["Camion/Bus", "Camion"]:
+                        self.draw_icon_object(ax, 'truck_red', center=[cx, cy], length=5.5, deg=0.0)
+                        h_off = 3.1
+                    elif "VRU" in eff_cls or eff_cls == "Pedone":
+                        self.draw_icon_object(ax, 'pedestrian_red', center=[cx, cy], length=2.8, deg=0.0,
+                                              halo_color='#FEE2E2', halo_radius=1.5)
+                        h_off = 1.8
+                    else:
+                        self.draw_icon_object(ax, 'barrier_red', center=[cx, cy], length=2.2, deg=0.0)
+                        h_off = 1.5
 
-                # Se in modalita evidenziazione errore FN ed e un vero FN, disegna cerchio bersaglio attorno al pericolo non visto
-                if self.highlight_fn and verdict == "FN":
+                    # Cerchio bersaglio attorno al pericolo non visto
                     ring = Circle((cx, cy), 2.2, facecolor='none', edgecolor='#E11D48',
                                   linewidth=2.4, linestyle='--', zorder=16)
                     ax.add_patch(ring)
                     glow = Circle((cx, cy), 2.8, facecolor='#FFE4E6', edgecolor='none',
                                   alpha=0.45, zorder=15)
                     ax.add_patch(glow)
+                else:
+                    if eff_cls == "Auto":
+                        icon_k = 'car_red' if verdict == "FP" else 'car_blue'
+                        self.draw_icon_object(ax, icon_k, center=[cx, cy], length=4.0, deg=0.0)
+                        h_off = 2.4
+                    elif eff_cls in ["Camion/Bus", "Camion"]:
+                        icon_k = 'truck_red' if verdict == "FP" else 'truck_purple'
+                        self.draw_icon_object(ax, icon_k, center=[cx, cy], length=5.5, deg=0.0)
+                        h_off = 3.1
+                    elif "VRU" in eff_cls or eff_cls == "Pedone":
+                        icon_k = 'pedestrian_red' if verdict == "FP" else 'pedestrian_green'
+                        self.draw_icon_object(ax, icon_k, center=[cx, cy], length=2.8, deg=0.0,
+                                              halo_color='#FEE2E2' if verdict == "FP" else '#DCFCE7', halo_radius=1.5)
+                        h_off = 1.8
+                    else:
+                        icon_k = 'barrier_red' if verdict == "FP" else 'barrier_hazard'
+                        self.draw_icon_object(ax, icon_k, center=[cx, cy], length=2.2, deg=0.0)
+                        h_off = 1.5
 
-                lbl_text = f"{b_lbl} {int(risk*100)}%" if verdict != "FN" else b_lbl
+                lbl_text = b_lbl if is_fn_mode else f"{b_lbl} {int(risk*100)}%"
                 lbl_x = float(np.clip(cx, -19.5, 19.5))
                 lbl_y = float(np.clip(cy + h_off, -22.5, 22.0))
                 ax.text(lbl_x, lbl_y, lbl_text,
-                        fontsize=7.0 if not (self.highlight_fn and verdict == "FN") else 7.2,
+                        fontsize=7.2 if is_fn_mode else 7.0,
                         fontweight='bold', color='#FFFFFF', linespacing=1.15,
-                        ha='center', va='bottom', zorder=18 if (self.highlight_fn and verdict == "FN") else 12, clip_on=True,
-                        bbox=dict(boxstyle='round,pad=0.20' if (self.highlight_fn and verdict == "FN") else 'round,pad=0.15',
+                        ha='center', va='bottom', zorder=18 if is_fn_mode else 12, clip_on=True,
+                        bbox=dict(boxstyle='round,pad=0.20' if is_fn_mode else 'round,pad=0.15',
                                   facecolor=b_bg,
-                                  edgecolor='#FFFFFF' if (self.highlight_fn and verdict == "FN") else '#0F172A',
-                                  linewidth=1.2 if (self.highlight_fn and verdict == "FN") else 0.8,
-                                  alpha=0.98 if (self.highlight_fn and verdict == "FN") else 0.95))
+                                  edgecolor='#FFFFFF' if is_fn_mode else '#0F172A',
+                                  linewidth=1.2 if is_fn_mode else 0.8,
+                                  alpha=0.98 if is_fn_mode else 0.95))
 
             if is_interactive:
                 from matplotlib.path import Path as MplPath
@@ -844,6 +1071,32 @@ class EvaluationDashboardVisualizer:
         self.fig.text(0.03, 0.958,
                       f"Figure 5: Valutazione Prestazioni & Matrice di Errore (BEV {int(self.max_range)}m)",
                       fontsize=10.5, fontweight='bold', color=c_border, ha='left', va='center')
+
+        # Badge Split nuScenes (TRAIN vs VAL inedito)
+        sample = self.adapter.all_samples[self.current_idx]
+        sc_name = self.adapter.nusc.get('scene', sample['scene_token'])['name']
+        is_val = sc_name in getattr(self, 'val_scenes', set())
+        if self.nav_val_only and is_val and self.current_idx in self.val_indices:
+            val_pos = self.val_indices.index(self.current_idx) + 1
+            split_lbl = f"VAL: {val_pos}/81  [{sc_name}]"
+        else:
+            split_lbl = f"SPLIT: VAL (Inedito ★) [{sc_name}]" if is_val else f"SPLIT: TRAIN [{sc_name}]"
+        split_bg = "#FEF3C7" if is_val else "#EFF6FF"
+        split_fg = "#92400E" if is_val else "#1E40AF"
+        split_edge = "#F59E0B" if is_val else "#3B82F6"
+        self.fig.text(0.355, 0.957, split_lbl,
+                      fontsize=8.0, fontweight='bold', color=split_fg, ha='center', va='center',
+                      bbox=dict(boxstyle='round,pad=0.28', facecolor=split_bg, edgecolor=split_edge, linewidth=1.1))
+
+        # Filtro Navigazione: Tutti (404) vs Solo VAL (81)
+        nav_bg = '#FEF3C7' if self.nav_val_only else '#F1F5F9'
+        nav_fg = '#92400E' if self.nav_val_only else '#334155'
+        nav_lbl = '★ SOLO VAL (81)' if self.nav_val_only else 'TUTTI I FRAME (404)'
+        ax_nav_flt = self.fig.add_axes([0.470, 0.940, 0.138, 0.034])
+        btn_nav_flt = Button(ax_nav_flt, nav_lbl, color=nav_bg, hovercolor='#FDE68A' if self.nav_val_only else '#E2E8F0')
+        btn_nav_flt.label.set_fontsize(7.5); btn_nav_flt.label.set_fontweight('bold'); btn_nav_flt.label.set_color(nav_fg)
+        btn_nav_flt.on_clicked(self.toggle_nav_filter)
+        self.ui_buttons.append((ax_nav_flt, btn_nav_flt))
 
         # Controlli salto frame e toggle FN in alto a destra
         fn_bg_main = '#E11D48' if self.highlight_fn else '#F8FAFC'
@@ -1084,19 +1337,30 @@ class EvaluationDashboardVisualizer:
                            fontsize=7.5, fontweight='bold', color=s_col, va='center')
 
         # Pulsante Apertura Nuova Finestra Confronto 1-a-1
+        # Pulsanti Azione: Confronto 1-a-1 & Recap Globale TRAIN vs VAL
         bbox_m = ax_matrix.get_position()
-        ax_btn_cmp = self.fig.add_axes([bbox_m.x0 + 0.05 * bbox_m.width,
-                                        bbox_m.y0 + 0.03 * bbox_m.height,
-                                        0.90 * bbox_m.width,
-                                        0.15 * bbox_m.height])
-        self.btn_compare = Button(ax_btn_cmp, "⚡ APRI CONFRONTO 1-A-1 (Nuova Finestra Side-by-Side)",
+        ax_btn_cmp = self.fig.add_axes([bbox_m.x0 + 0.02 * bbox_m.width,
+                                        bbox_m.y0 + 0.025 * bbox_m.height,
+                                        0.46 * bbox_m.width,
+                                        0.16 * bbox_m.height])
+        self.btn_compare = Button(ax_btn_cmp, "⚡ CONFRONTO 1-A-1",
                                   color='#EFF6FF', hovercolor='#DBEAFE')
-        self.btn_compare.label.set_fontsize(8.2); self.btn_compare.label.set_fontweight('bold'); self.btn_compare.label.set_color('#1D4ED8')
+        self.btn_compare.label.set_fontsize(7.8); self.btn_compare.label.set_fontweight('bold'); self.btn_compare.label.set_color('#1D4ED8')
         self.btn_compare.on_clicked(self.open_comparison_window)
         self.ui_buttons.append((ax_btn_cmp, self.btn_compare))
 
+        ax_btn_recap = self.fig.add_axes([bbox_m.x0 + 0.51 * bbox_m.width,
+                                          bbox_m.y0 + 0.025 * bbox_m.height,
+                                          0.47 * bbox_m.width,
+                                          0.16 * bbox_m.height])
+        self.btn_recap = Button(ax_btn_recap, "★ RECAP: TRAIN vs VAL",
+                                color='#FEF3C7', hovercolor='#FDE68A')
+        self.btn_recap.label.set_fontsize(7.8); self.btn_recap.label.set_fontweight('bold'); self.btn_recap.label.set_color('#92400E')
+        self.btn_recap.on_clicked(self.open_global_recap_window)
+        self.ui_buttons.append((ax_btn_recap, self.btn_recap))
+
         self.fig.text(0.50, 0.012,
-                      "[<- / ->] o [A / D]: Frame  |  [F]: Evidenzia Errori (FN)  |  [M]: Cicla Modello  |  [T]: Cicla GT  |  [C]: Apri Finestra Confronto  |  [Hover]: Dettagli  |  [S]: Salva HD",
+                      "[<- / ->] Frame  |  [V]: Filtro VAL  |  [F]: Evidenzia FN  |  [M]: Modello  |  [T]: GT  |  [C]: Confronto 1-a-1  |  [R]: Recap Globale  |  [S]: Salva HD",
                       fontsize=8.0, color='#64748B', ha='center', style='italic')
 
         self.fig.canvas.draw_idle()
@@ -1114,10 +1378,35 @@ class EvaluationDashboardVisualizer:
             self.current_gt_key = gt_key
             self.load_frame(self.current_idx, broadcast=False)
 
-    def on_key_step(self, step):
-        target = self.current_idx + step
-        if 0 <= target < self.total_frames:
+    def toggle_nav_filter(self, event=None):
+        self.nav_val_only = not self.nav_val_only
+        st = "SOLO VAL (81 Frame Inediti)" if self.nav_val_only else "TUTTI I FRAME (404)"
+        print(f"\n>>> [FILTRO SPLIT NAVIGAZIONE] Attivo: {st}")
+        if self.nav_val_only and self.current_idx not in self.val_indices:
+            next_vals = [i for i in self.val_indices if i >= self.current_idx]
+            target = next_vals[0] if next_vals else self.val_indices[0]
             self.load_frame(target, broadcast=True)
+        else:
+            self.render()
+
+    def on_key_step(self, step):
+        if self.nav_val_only and len(self.val_indices) > 0:
+            if self.current_idx in self.val_indices:
+                curr_pos = self.val_indices.index(self.current_idx)
+                target_pos = (curr_pos + step) % len(self.val_indices)
+            else:
+                if step > 0:
+                    next_vals = [i for i in self.val_indices if i >= self.current_idx]
+                    target_pos = self.val_indices.index(next_vals[0]) if next_vals else 0
+                else:
+                    prev_vals = [i for i in self.val_indices if i <= self.current_idx]
+                    target_pos = self.val_indices.index(prev_vals[-1]) if prev_vals else len(self.val_indices) - 1
+            target = self.val_indices[target_pos]
+            self.load_frame(target, broadcast=True)
+        else:
+            target = self.current_idx + step
+            if 0 <= target < self.total_frames:
+                self.load_frame(target, broadcast=True)
 
     def on_jump_frame(self, text):
         try:
@@ -1181,6 +1470,18 @@ class EvaluationDashboardVisualizer:
         self.fig_cmp.text(0.030, 0.966,
                           f"Figure 5b: Confronto 1-a-1 tra Modelli & Score  |  Target GT: {gt_cfg['short']}",
                           fontsize=9.8, fontweight='bold', color=c_border, ha='left', va='center')
+
+        # Badge Split nel confronto
+        sample = self.adapter.all_samples[self.current_idx]
+        sc_name = self.adapter.nusc.get('scene', sample['scene_token'])['name']
+        is_val = sc_name in getattr(self, 'val_scenes', set())
+        split_lbl = f"[{'VAL Inedito ★' if is_val else 'TRAIN'} - {sc_name}]"
+        split_bg = "#FEF3C7" if is_val else "#EFF6FF"
+        split_fg = "#92400E" if is_val else "#1E40AF"
+        split_edge = "#F59E0B" if is_val else "#3B82F6"
+        self.fig_cmp.text(0.480, 0.966, split_lbl,
+                          fontsize=8.0, fontweight='bold', color=split_fg, ha='center', va='center',
+                          bbox=dict(boxstyle='round,pad=0.22', facecolor=split_bg, edgecolor=split_edge, linewidth=1.0))
 
         # Pulsante Evidenzia FN nel confronto
         fn_bg = '#E11D48' if self.highlight_fn else '#F1F5F9'
@@ -1365,12 +1666,287 @@ class EvaluationDashboardVisualizer:
             self.cmp_model_b_key = model_key
             self.render_comparison_window()
 
+    # =========================================================================
+    # FINESTRA DEDICATA RECAP GLOBALE: TRAIN vs VAL (BENCHMARK GENERALIZZAZIONE)
+    # =========================================================================
+    def open_global_recap_window(self, event=None):
+        """Apre o porta in primo piano la finestra di recap generale divisa tra TRAIN e VAL."""
+        print("\n>>> Apertura Finestra Recap Globale: TRAIN vs VAL...")
+        if self.fig_recap is None or not plt.fignum_exists(self.fig_recap.number):
+            self.fig_recap = plt.figure(num="nuScenes BEV - Recap Globale TRAIN vs VAL",
+                                        figsize=(18, 9.4), facecolor='#FFFFFF')
+            self.fig_recap.canvas.manager.set_window_title("nuScenes BEV - Benchmark Globale: TRAIN vs VAL")
+            self.fig_recap.canvas.mpl_connect('key_press_event', self.on_key)
+            self.recap_model_key = self.current_model_key
+            self.recap_gt_key = self.current_gt_key
+        else:
+            plt.figure(self.fig_recap.number)
+
+        self.render_global_recap_window()
+        plt.show(block=False)
+
+    def select_recap_model(self, model_key):
+        if model_key != self.recap_model_key:
+            self.recap_model_key = model_key
+            self.render_global_recap_window()
+
+    def select_recap_gt(self, gt_key):
+        if gt_key != self.recap_gt_key:
+            self.recap_gt_key = gt_key
+            self.render_global_recap_window()
+
+    def compute_split_aggregates(self, model_key, gt_key):
+        """Aggrega metriche globali per classe su TRAIN (323 frame) e VAL (81 frame) dalla cache precalcolata."""
+        m_k = "NEURO_SIMB" if model_key in ["HYBRID", "NEURO_SIMB"] else model_key
+        g_k = "NEURO_SIMB" if gt_key in ["HYBRID", "NEURO_SIMB"] else gt_key
+
+        def empty_stats():
+            return {c: {"tp": 0, "fp": 0, "fn": 0, "gt_count": 0, "pred_count": 0} for c in range(4)}
+
+        train_stats = empty_stats()
+        val_stats = empty_stats()
+
+        if self.eval_cache and "frames" in self.eval_cache:
+            fc = self.eval_cache["frames"]
+            for idx_str, f_data in fc.items():
+                idx = int(idx_str)
+                is_val = idx in self.val_indices
+                curr_dict = val_stats if is_val else train_stats
+
+                m_data = f_data.get("models", {}).get(m_k, {})
+                g_data = m_data.get(g_k, {})
+                st = g_data.get("stats", {})
+                for c in range(4):
+                    c_st = st.get(str(c), {})
+                    curr_dict[c]["tp"] += c_st.get("tp", 0)
+                    curr_dict[c]["fp"] += c_st.get("fp", 0)
+                    curr_dict[c]["fn"] += c_st.get("fn", 0)
+                    curr_dict[c]["gt_count"] += c_st.get("gt_count", 0)
+                    curr_dict[c]["pred_count"] += c_st.get("pred_count", 0)
+
+        def calc_metrics(st_dict):
+            t_tp = sum(st_dict[c]["tp"] for c in range(4))
+            t_fp = sum(st_dict[c]["fp"] for c in range(4))
+            t_fn = sum(st_dict[c]["fn"] for c in range(4))
+            t_gt = sum(st_dict[c]["gt_count"] for c in range(4))
+            prec = (t_tp / (t_tp + t_fp) * 100.0) if (t_tp + t_fp) > 0 else 0.0
+            rec = (t_tp / (t_tp + t_fn) * 100.0) if (t_tp + t_fn) > 0 else 0.0
+            f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+
+            per_class = {}
+            for c in range(4):
+                tp = st_dict[c]["tp"]
+                fp = st_dict[c]["fp"]
+                fn = st_dict[c]["fn"]
+                gt = st_dict[c]["gt_count"]
+                p = (tp / (tp + fp) * 100.0) if (tp + fp) > 0 else 0.0
+                r = (tp / (tp + fn) * 100.0) if (tp + fn) > 0 else 0.0
+                f = (2 * p * r / (p + r)) if (p + r) > 0 else 0.0
+                per_class[c] = {"p": p, "r": r, "f1": f, "tp": tp, "fp": fp, "fn": fn, "gt": gt}
+
+            return {"tp": t_tp, "fp": t_fp, "fn": t_fn, "gt": t_gt, "prec": prec, "rec": rec, "f1": f1, "per_class": per_class}
+
+        return calc_metrics(train_stats), calc_metrics(val_stats)
+
+    def render_global_recap_window(self):
+        """Renderizza la finestra di benchmark divisa a metà: Colonna TRAIN e Colonna VAL."""
+        if self.fig_recap is None or not plt.fignum_exists(self.fig_recap.number):
+            return
+
+        self.fig_recap.clf()
+        self.fig_recap.patch.set_facecolor('#FFFFFF')
+        self.recap_ui_buttons = []
+
+        c_border = '#0F172A'
+
+        # Titolo e Controlli Superiori
+        self.fig_recap.text(0.030, 0.965,
+                            f"Figure 5c: Recap Globale & Capacità di Generalizzazione (TRAIN vs VAL)",
+                            fontsize=10.5, fontweight='bold', color=c_border, ha='left', va='center')
+
+        # Selettore Modello
+        self.fig_recap.text(0.030, 0.916, "Modello:", fontsize=8.2, fontweight='bold', color='#334155', va='center')
+        m_choices = [
+            ("NEURO_SIMB", "★ NEURO-SIMB", 0.082, 0.095),
+            ("REAL_GT", "GT REALE", 0.183, 0.078),
+            ("POS_ONLY", "SOLO POS.", 0.267, 0.078),
+            ("BAYES", "BAYES", 0.351, 0.068),
+            ("GEOMETRIC", "SINT. GEOM", 0.425, 0.082),
+            ("SEMANTIC", "SINT. SEM", 0.513, 0.082)
+        ]
+        for mk, mlbl, mx, mw in m_choices:
+            is_m = (self.recap_model_key == mk)
+            bg_c = '#2563EB' if is_m else '#F1F5F9'
+            tx_c = '#FFFFFF' if is_m else '#1E293B'
+            ax_m = self.fig_recap.add_axes([mx, 0.902, mw, 0.028])
+            btn_m = Button(ax_m, mlbl, color=bg_c, hovercolor='#93C5FD' if not is_m else bg_c)
+            btn_m.label.set_fontsize(7.2); btn_m.label.set_fontweight('bold'); btn_m.label.set_color(tx_c)
+            btn_m.on_clicked(lambda ev, k=mk: self.select_recap_model(k))
+            self.recap_ui_buttons.append((ax_m, btn_m))
+
+        # Selettore GT
+        self.fig_recap.text(0.612, 0.916, "Target GT:", fontsize=8.2, fontweight='bold', color='#334155', va='center')
+        g_choices = [
+            ("REAL", "1. GT Reale 3D", 0.672, 0.086),
+            ("NEURO_SIMB", "2. GT Ibrida ★", 0.764, 0.086),
+            ("GEOMETRIC", "3. Geometrica", 0.856, 0.076),
+            ("SEMANTIC", "4. Semantica", 0.938, 0.052)
+        ]
+        for gk, glbl, gx, gw in g_choices:
+            is_g = (self.recap_gt_key == gk)
+            bg_c = '#7C3AED' if is_g else '#F1F5F9'
+            tx_c = '#FFFFFF' if is_g else '#1E293B'
+            ax_g = self.fig_recap.add_axes([gx, 0.902, gw, 0.028])
+            btn_g = Button(ax_g, glbl, color=bg_c, hovercolor='#DDD6FE' if not is_g else bg_c)
+            btn_g.label.set_fontsize(7.2); btn_g.label.set_fontweight('bold'); btn_g.label.set_color(tx_c)
+            btn_g.on_clicked(lambda ev, k=gk: self.select_recap_gt(k))
+            self.recap_ui_buttons.append((ax_g, btn_g))
+
+        # Calcolo aggregato
+        tr_res, val_res = self.compute_split_aggregates(self.recap_model_key, self.recap_gt_key)
+
+        # Layout 2 Colonne (Sinistra: TRAIN | Destra: VAL)
+        gs = GridSpec(2, 2, figure=self.fig_recap, left=0.03, right=0.97, bottom=0.08, top=0.87,
+                      width_ratios=[1.0, 1.0], height_ratios=[0.55, 1.45], wspace=0.08, hspace=0.20)
+
+        ax_kpi_tr = self.fig_recap.add_subplot(gs[0, 0])
+        ax_kpi_val = self.fig_recap.add_subplot(gs[0, 1])
+        ax_tab_tr = self.fig_recap.add_subplot(gs[1, 0])
+        ax_tab_val = self.fig_recap.add_subplot(gs[1, 1])
+
+        cat_names = ["Auto", "Camion/Bus", "VRU (Pedoni/Bici)", "Barriere"]
+
+        def render_half(ax_kpi, ax_tab, title, tag, num_frames, res, theme_color, bg_card, is_val=False):
+            # 1. KPI Card
+            ax_kpi.set_facecolor('#FFFFFF')
+            for sp in ax_kpi.spines.values():
+                sp.set_color(c_border); sp.set_linewidth(1.1)
+            ax_kpi.set_xlim(0, 1); ax_kpi.set_ylim(0, 1)
+            ax_kpi.set_xticks([]); ax_kpi.set_yticks([])
+
+            # Box F1
+            f1_val = res["f1"]
+            f1_col = '#15803D' if f1_val >= 60.0 else ('#B45309' if f1_val >= 30.0 else '#B91C1C')
+            ax_kpi.add_patch(Rectangle((0.02, 0.10), 0.22, 0.80, transform=ax_kpi.transAxes,
+                                       facecolor=bg_card, edgecolor=theme_color, linewidth=1.3, zorder=2))
+            ax_kpi.text(0.13, 0.70, "F1-SCORE MEDIO", transform=ax_kpi.transAxes,
+                        fontsize=7.8, fontweight='bold', color=f1_col, ha='center')
+            ax_kpi.text(0.13, 0.36, f"{f1_val:.1f}%", transform=ax_kpi.transAxes,
+                        fontsize=17.0, fontweight='bold', color=f1_col, ha='center')
+
+            # Statistiche dettagliate
+            tag_badge = "★ DATI INEDITI (GENERALIZZAZIONE)" if is_val else "DATI VISTI (ADDESTRAMENTO)"
+            ax_kpi.text(0.27, 0.80, f"{tag}: {title} ({num_frames} Fotogrammi)", transform=ax_kpi.transAxes,
+                        fontsize=8.5, fontweight='bold', color=theme_color)
+            ax_kpi.text(0.27, 0.56, f"Recall Globale: {res['rec']:.1f}%   |   Precision Globale: {res['prec']:.1f}%",
+                        transform=ax_kpi.transAxes, fontsize=8.2, fontweight='bold', color='#1E293B')
+            ax_kpi.text(0.27, 0.32, f"GT Reali (TP+FN): {res['tp'] + res['fn']}   |   TP (Trovati): {res['tp']}   |   FP (Allarmi): {res['fp']}   |   FN (Mancati): {res['fn']}",
+                        transform=ax_kpi.transAxes, fontsize=7.8, color='#334155')
+            ax_kpi.text(0.27, 0.12, f"Condizione: {tag_badge}",
+                        transform=ax_kpi.transAxes, fontsize=7.2, color=theme_color, style='italic')
+
+            # 2. Table
+            ax_tab.set_facecolor('#FFFFFF')
+            for sp in ax_tab.spines.values():
+                sp.set_color(c_border); sp.set_linewidth(1.1)
+            ax_tab.set_xlim(0, 1); ax_tab.set_ylim(0, 1)
+            ax_tab.set_xticks([]); ax_tab.set_yticks([])
+            ax_tab.set_title(f"Tabella Prestazioni Dettagliate - {tag} ({num_frames} Frame)",
+                             fontsize=9.0, fontweight='bold', pad=8, color=c_border)
+
+            headers = ["Categoria", "GT Tot", "TP", "FP", "FN", "Precision", "Recall", "F1-Score"]
+            col_x = [0.03, 0.22, 0.31, 0.40, 0.49, 0.58, 0.72, 0.86]
+
+            ax_tab.add_patch(Rectangle((0.02, 0.85), 0.96, 0.12, transform=ax_tab.transAxes,
+                                       facecolor='#F1F5F9', edgecolor='none', zorder=2))
+            for x_h, h_txt in zip(col_x, headers):
+                ax_tab.text(x_h, 0.91, h_txt, transform=ax_tab.transAxes,
+                            fontsize=7.3, fontweight='bold', color=c_border, va='center')
+
+            y_r = 0.73
+            for c in range(4):
+                c_data = res["per_class"][c]
+                gt_c_tot = c_data['tp'] + c_data['fn']
+                ax_tab.text(col_x[0], y_r, cat_names[c], transform=ax_tab.transAxes,
+                            fontsize=7.4, fontweight='bold', color='#1E293B', va='center')
+                ax_tab.text(col_x[1], y_r, f"{gt_c_tot}", transform=ax_tab.transAxes,
+                            fontsize=7.4, fontweight='bold', color='#334155', va='center')
+                ax_tab.text(col_x[2], y_r, f"{c_data['tp']}", transform=ax_tab.transAxes,
+                            fontsize=7.4, fontweight='bold', color='#10B981', va='center')
+                ax_tab.text(col_x[3], y_r, f"{c_data['fp']}", transform=ax_tab.transAxes,
+                            fontsize=7.4, fontweight='bold', color='#EF4444', va='center')
+                ax_tab.text(col_x[4], y_r, f"{c_data['fn']}", transform=ax_tab.transAxes,
+                            fontsize=7.4, fontweight='bold', color='#8B5CF6', va='center')
+                ax_tab.text(col_x[5], y_r, f"{c_data['p']:.1f}%", transform=ax_tab.transAxes,
+                            fontsize=7.4, color='#0284C7', va='center')
+                # Se GT=0, indica chiaramente N/A anziché solo 0%
+                rec_str = f"{c_data['r']:.1f}%" if gt_c_tot > 0 else "0.0% (N/A)"
+                ax_tab.text(col_x[6], y_r, rec_str, transform=ax_tab.transAxes,
+                            fontsize=7.4, color='#0284C7' if gt_c_tot > 0 else '#94A3B8', va='center')
+                ax_tab.text(col_x[7], y_r, f"{c_data['f1']:.1f}%", transform=ax_tab.transAxes,
+                            fontsize=7.8, fontweight='bold', color='#0F172A', va='center')
+                y_r -= 0.135
+
+            # Media Globale
+            res_gt_tot = res['tp'] + res['fn']
+            ax_tab.add_patch(Rectangle((0.02, 0.08), 0.96, 0.12, transform=ax_tab.transAxes,
+                                       facecolor=bg_card, edgecolor=theme_color, linewidth=1.0, zorder=2))
+            ax_tab.text(col_x[0], 0.14, "MEDIA GLOBALE", transform=ax_tab.transAxes,
+                        fontsize=7.8, fontweight='bold', color=theme_color, va='center')
+            ax_tab.text(col_x[1], 0.14, f"{res_gt_tot}", transform=ax_tab.transAxes,
+                        fontsize=7.8, fontweight='bold', color='#334155', va='center')
+            ax_tab.text(col_x[2], 0.14, f"{res['tp']}", transform=ax_tab.transAxes,
+                        fontsize=7.8, fontweight='bold', color='#10B981', va='center')
+            ax_tab.text(col_x[3], 0.14, f"{res['fp']}", transform=ax_tab.transAxes,
+                        fontsize=7.8, fontweight='bold', color='#EF4444', va='center')
+            ax_tab.text(col_x[4], 0.14, f"{res['fn']}", transform=ax_tab.transAxes,
+                        fontsize=7.8, fontweight='bold', color='#8B5CF6', va='center')
+            ax_tab.text(col_x[5], 0.14, f"{res['prec']:.1f}%", transform=ax_tab.transAxes,
+                        fontsize=7.8, fontweight='bold', color='#0284C7', va='center')
+            ax_tab.text(col_x[6], 0.14, f"{res['rec']:.1f}%", transform=ax_tab.transAxes,
+                        fontsize=7.8, fontweight='bold', color='#0284C7', va='center')
+            ax_tab.text(col_x[7], 0.14, f"{res['f1']:.1f}%", transform=ax_tab.transAxes,
+                        fontsize=8.5, fontweight='bold', color=theme_color, va='center')
+
+        render_half(ax_kpi_tr, ax_tab_tr, "SPLIT DI TRAINING", "TRAIN",
+                    len(self.train_indices), tr_res, '#1D4ED8', '#EFF6FF', is_val=False)
+        render_half(ax_kpi_val, ax_tab_val, "SPLIT DI VALIDAZIONE", "VAL",
+                    len(self.val_indices), val_res, '#B45309', '#FEF3C7', is_val=True)
+
+        # Banner Inferiore: Bilancio e Analisi Generalizzazione
+        d_f1 = val_res['f1'] - tr_res['f1']
+        d_rec = val_res['rec'] - tr_res['rec']
+        d_prec = val_res['prec'] - tr_res['prec']
+
+        if abs(d_f1) <= 3.0:
+            comm = "Overfitting Nullo: perfetta coerenza delle predizioni tra scene viste e inedite."
+            b_col = '#15803D'; b_bg = '#F0FDF4'
+        elif d_f1 > 0:
+            comm = f"Ottima Robustezza: il modello ottiene +{d_f1:.1f}% F1 sui dati di validazione."
+            b_col = '#15803D'; b_bg = '#F0FDF4'
+        else:
+            comm = f"Gap di Generalizzazione fisiologico (-{abs(d_f1):.1f}% F1 rispetto a train)."
+            b_col = '#0369A1'; b_bg = '#F0F9FF'
+
+        banner = (f"BILANCIO SCIENTIFICO GENERALIZZAZIONE:  "
+                  f"Δ F1-Score: {d_f1:+.1f}%  |  "
+                  f"Δ Recall: {d_rec:+.1f}%  |  "
+                  f"Δ Precision: {d_prec:+.1f}%    [{comm}]")
+
+        self.fig_recap.text(0.50, 0.025, banner,
+                            fontsize=9.0, fontweight='bold', color=b_col, ha='center', va='center',
+                            bbox=dict(boxstyle='round,pad=0.35', facecolor=b_bg, edgecolor=b_col, linewidth=1.1))
+
+        self.fig_recap.canvas.draw_idle()
+
     def toggle_highlight_fn(self, event=None):
         self.highlight_fn = not self.highlight_fn
         print(f"\n>>> Evidenziazione Falsi Negativi (FN): {'ATTIVA (Modalita Diagnostica Errore)' if self.highlight_fn else 'DISATTIVATA'}")
         self.render()
         if self.fig_cmp is not None and plt.fignum_exists(self.fig_cmp.number):
             self.render_comparison_window()
+        if self.fig_recap is not None and plt.fignum_exists(self.fig_recap.number):
+            self.render_global_recap_window()
 
     # =========================================================================
     # GESTIONE EVENTI (MOUSE, TASTIERA, TOOLTIP)
@@ -1380,6 +1956,10 @@ class EvaluationDashboardVisualizer:
             self.on_key_step(1)
         elif event.key in ['left', 'a']:
             self.on_key_step(-1)
+        elif event.key in ['v', 'V']:
+            self.toggle_nav_filter()
+        elif event.key in ['r', 'R']:
+            self.open_global_recap_window()
         elif event.key in ['f', 'F']:
             self.toggle_highlight_fn()
         elif event.key in ['m', 'M']:
@@ -1462,14 +2042,21 @@ class EvaluationDashboardVisualizer:
             if 'min_d_road' in meta and meta['min_d_road'] < 90.0:
                 roadside_line = f"• Vicinanza Carreggiata: d={meta['min_d_road']:.1f}m dal cordolo (Accosto: {int(meta.get('roadside_f', 0.0)*100)}%)\n"
 
-            is_fn = (meta['verdict'] == 'FN')
+            zone_fns = meta.get('zone_fns', [])
+            is_fn = (meta['verdict'] in ['FN', 'TP/FN']) or (len(zone_fns) > 0)
             header_title = "⚠ DIAGNOSTICA ERRORE: FALSO NEGATIVO (FN)" if is_fn else "VALUTAZIONE SCIENTIFICA ZONA D'OMBRA"
+
+            fn_line = ""
+            if len(zone_fns) > 0:
+                fn_str = ", ".join(cat_names[c] for c in zone_fns)
+                fn_line = f"• OSTACOLI MANCATI (FN): {fn_str}\n"
 
             tooltip_text = (
                 f"{header_title}\n"
                 f"• Verdetto:              {verdict_str}\n"
                 f"• Ostacolo Reale:        {gt_str}\n"
                 f"• Ostacolo Predetto:     {pred_str}\n"
+                f"{fn_line}"
                 f"• Modello: {self.current_model_key}  |  Target GT: {self.current_gt_key}\n"
                 f"• Probabilità AI:        Auto: {int(probs[0]*100)}% | Camion: {int(probs[1]*100)}% | VRU: {int(probs[2]*100)}% | Barr: {int(probs[3]*100)}%\n"
                 f"• Composizione Suolo:    Strada: {rf_pct}% | Marciapiede: {sf_pct}% | Strisce: {cf_pct}% | Terreno/Verde: {tf_pct}%\n"

@@ -53,11 +53,78 @@ def get_prioritized_classes(road_f=0.0, side_f=0.0, cross_f=0.0, area=0.0):
         if area >= 18.0:
             valid_classes.append(1)  # Camion
         valid_classes.append(3)  # Moto
+        valid_classes.append(5)  # Barriera (cantieri stradali / coni)
     elif is_walkway:
-        valid_classes.extend([2, 4])  # Pedone, Bici
+        valid_classes.extend([2, 4, 5])  # Pedone, Bici, Barriera (cantieri marciapiede)
     else:
         valid_classes.extend([5, 4, 2])  # Barriera, Bici, Pedone
     return valid_classes
+
+
+def apply_occluder_compatibility_filter(valid_classes, occluder_name=None, occluder_wlh=None, enabled=True):
+    """
+    Vincolo di Compatibilità Dimensionale tra Occludore e Bersaglio (Occluder Compatibility Constraint):
+    1. Se l'occludore è un pedone, ciclista o moto (o sagoma molto stretta w < 0.95m):
+       non può nascondere veicoli ingombranti (Auto, Camion) né barriere fisse.
+       Ammessi solo altri VRU (Pedoni e Bici).
+    2. Se l'occludore è un'auto normale (berlina/city car, altezza tipica 1.4-1.65m, minore della quota LiDAR di 1.84m):
+       non può nascondere fisicamente camion pesanti o autobus alti > 3.0m (il fascio laser vi passerebbe sopra).
+       Esclude quindi Camion/Bus (classe 1).
+    3. Se l'occludore è un mezzo pesante (Truck, Bus, Trailer) o una struttura statica (edificio/muro static.manmade):
+       può celare qualsiasi categoria.
+    """
+    if not enabled:
+        return valid_classes
+
+    if occluder_name is None and occluder_wlh is None:
+        return valid_classes
+
+    name_l = str(occluder_name).lower() if occluder_name is not None else ""
+    occ_h = float(occluder_wlh[2]) if (occluder_wlh is not None and len(occluder_wlh) >= 3) else None
+    occ_w = float(occluder_wlh[0]) if (occluder_wlh is not None and len(occluder_wlh) >= 3) else None
+
+    is_human_or_bike = any(k in name_l for k in ["human", "pedestrian", "bicycle", "motorcycle"])
+    is_narrow = (occ_w is not None and occ_w < 0.95)
+    is_heavy_vehicle = any(k in name_l for k in ["truck", "bus", "trailer", "construction"])
+    is_manmade = ("static.manmade" in name_l or "building" in name_l or "wall" in name_l)
+    is_tall = (occ_h is not None and occ_h >= 1.50) # Calibrato: veicoli >= 1.50m possono celare mezzi commerciali leggeri
+
+    # Caso 1: Occludore piccolo/stretto (Pedone, Ciclista, Moto)
+    if is_human_or_bike or is_narrow:
+        return [c for c in valid_classes if c in [2, 4]]
+
+    # Caso 2: Occludore è un'auto molto bassa (non SUV, non furgone, non camion, non muro)
+    if not (is_heavy_vehicle or is_manmade or is_tall):
+        # Esclude Camion/Bus (classe 1)
+        return [c for c in valid_classes if c != 1]
+
+    # Caso 3: Occludore grande/alto (Muro, Camion, Bus, Trailer) -> ammette tutto
+    return valid_classes
+
+
+def get_occluder_filter_explanation(occluder_name=None, occluder_wlh=None):
+    """
+    Restituisce una descrizione concisa e scientifica del vincolo imposto dall'occludore.
+    """
+    if occluder_name is None and occluder_wlh is None:
+        return "Nessun vincolo (occludore non identificato)"
+
+    name_l = str(occluder_name).lower() if occluder_name is not None else ""
+    occ_h = float(occluder_wlh[2]) if (occluder_wlh is not None and len(occluder_wlh) >= 3) else None
+    occ_w = float(occluder_wlh[0]) if (occluder_wlh is not None and len(occluder_wlh) >= 3) else None
+
+    is_human_or_bike = any(k in name_l for k in ["human", "pedestrian", "bicycle", "motorcycle"])
+    is_narrow = (occ_w is not None and occ_w < 0.95)
+    is_heavy_vehicle = any(k in name_l for k in ["truck", "bus", "trailer", "construction"])
+    is_manmade = ("static.manmade" in name_l or "building" in name_l or "wall" in name_l)
+    is_tall = (occ_h is not None and occ_h >= 2.5)
+
+    if is_human_or_bike or is_narrow:
+        return "Sagoma VRU stretta: ammessi solo Pedoni/Bici (esclusi veicoli e barriere)"
+    if not (is_heavy_vehicle or is_manmade or is_tall):
+        return "Sagoma Auto standard: Camion/Bus ESCLUSO (quota LiDAR 1.84m ne vedrebbe il tetto)"
+    return "Sagoma Alta/Pesante: ammette qualsiasi categoria (può celare tutto)"
+
 
 
 # =============================================================================
@@ -75,7 +142,10 @@ def compute_synthetic_ground_truth_geometric(
     min_dist=3.0,
     sp_sample=None,
     max_attempts=20,
-    fit_threshold=0.85
+    fit_threshold=0.85,
+    occluder_name=None,
+    occluder_wlh=None,
+    use_occluder_filter=True
 ):
     """
     Calcola la Ground Truth Sintetica Geometrica (Spatially-Constrained).
@@ -96,6 +166,9 @@ def compute_synthetic_ground_truth_geometric(
         return gt_neuro_6, placed_objects
 
     valid_classes = get_prioritized_classes(road_f=road_f, side_f=side_f, cross_f=cross_f, area=area)
+    valid_classes = apply_occluder_compatibility_filter(
+        valid_classes, occluder_name=occluder_name, occluder_wlh=occluder_wlh, enabled=use_occluder_filter
+    )
 
     sample_poly = sp_sample if (sp_sample is not None and not sp_sample.is_empty) else sp
     minx, miny, maxx, maxy = sample_poly.bounds
@@ -106,9 +179,11 @@ def compute_synthetic_ground_truth_geometric(
         wlh = CLASS_WLH.get(class_idx, [1.9, 4.5, 1.5])
         obj_name = NUSC_NAMES[class_idx]
         fits = False
+        cur_min_dist = 0.8 if class_idx == 5 else min_dist
 
         # 1. Primo tentativo: baricentro / representative_point
-        if not placed_objects:
+        can_try_center = (not placed_objects) or (class_idx == 5 and all(sample_poly.representative_point().distance(op[2]) > cur_min_dist for op in placed_objects))
+        if can_try_center:
             pt = sample_poly.representative_point()
             cx, cy = float(pt.x), float(pt.y)
             yaw = float(np.arctan2(cy, cx))
@@ -118,7 +193,7 @@ def compute_synthetic_ground_truth_geometric(
             R = np.array([[c_y, -s_y], [s_y, c_y]])
             footprint = ShapelyPolygon(np.dot(corners, R.T) + [cx, cy])
 
-            dist_ok = all(pt.distance(op if isinstance(op, ShapelyPoint) else ShapelyPoint(op[0], op[1])) > min_dist for op in ext_pts)
+            dist_ok = all(pt.distance(op if isinstance(op, ShapelyPoint) else ShapelyPoint(op[0], op[1])) > cur_min_dist for op in ext_pts)
             if dist_ok and sp.intersection(footprint).area >= footprint.area * fit_threshold:
                 gt_neuro_6[class_idx] = 1.0
                 placed_objects.append((class_idx, obj_name, pt, yaw, wlh))
@@ -127,8 +202,9 @@ def compute_synthetic_ground_truth_geometric(
         # 2. Tentativi casuali se il baricentro fallisce o e gia occupato
         if not fits:
             attempts = 0
+            cur_max_attempts = max_attempts * 2 if class_idx == 5 else max_attempts
             np.random.seed(int(area * 100) + int(dist * 100) + class_idx)
-            while attempts < max_attempts:
+            while attempts < cur_max_attempts:
                 pt_x = np.random.uniform(minx, maxx)
                 pt_y = np.random.uniform(miny, maxy)
                 pt_test = ShapelyPoint(pt_x, pt_y)
@@ -141,8 +217,8 @@ def compute_synthetic_ground_truth_geometric(
                     R = np.array([[c_y, -s_y], [s_y, c_y]])
                     footprint = ShapelyPolygon(np.dot(corners, R.T) + [cx, cy])
 
-                    dist_ok_placed = all(pt_test.distance(op[2]) > min_dist for op in placed_objects)
-                    dist_ok_ext = all(pt_test.distance(op if isinstance(op, ShapelyPoint) else ShapelyPoint(op[0], op[1])) > min_dist for op in ext_pts)
+                    dist_ok_placed = all(pt_test.distance(op[2]) > cur_min_dist for op in placed_objects)
+                    dist_ok_ext = all(pt_test.distance(op if isinstance(op, ShapelyPoint) else ShapelyPoint(op[0], op[1])) > cur_min_dist for op in ext_pts)
 
                     if dist_ok_placed and dist_ok_ext and sp.intersection(footprint).area >= footprint.area * fit_threshold:
                         gt_neuro_6[class_idx] = 1.0
@@ -165,7 +241,10 @@ def compute_synthetic_ground_truth_semantic(
     area=None,
     dist=0.0,
     gt_raw_6=None,
-    sp_sample=None
+    sp_sample=None,
+    occluder_name=None,
+    occluder_wlh=None,
+    use_occluder_filter=True
 ):
     """
     Calcola la Ground Truth Sintetica Semantica (Semantic-Affordance / Permissive Prior).
@@ -216,6 +295,15 @@ def compute_synthetic_ground_truth_semantic(
     if terr_f >= 0.55 and obb_w >= 1.0 and area >= 3.0 and road_f < 0.15 and side_f < 0.10:
         gt_neuro_6[5] = 1.0  # Barriere
 
+    # Filtro di compatibilità dimensionale dell'occludore
+    valid_sem = [c for c in range(6) if gt_neuro_6[c] > 0.5]
+    valid_sem = apply_occluder_compatibility_filter(
+        valid_sem, occluder_name=occluder_name, occluder_wlh=occluder_wlh, enabled=use_occluder_filter
+    )
+    for c in range(6):
+        if c not in valid_sem:
+            gt_neuro_6[c] = 0.0
+
     # Per il visualizzatore: genera i box per le classi accese
     sample_poly = sp_sample if (sp_sample is not None and not sp_sample.is_empty) else sp
     pt = sample_poly.representative_point()
@@ -245,7 +333,10 @@ def compute_synthetic_ground_truth_hybrid(
     min_dist=3.0,
     sp_sample=None,
     max_attempts=20,
-    fit_threshold=0.70
+    fit_threshold=0.70,
+    occluder_name=None,
+    occluder_wlh=None,
+    use_occluder_filter=True
 ):
     """
     Calcola la Ground Truth Sintetica IBRIDA Neuro-Simbolica (Geometrica + Semantica).
@@ -259,6 +350,7 @@ def compute_synthetic_ground_truth_hybrid(
        - Solo le classi semanticamente ammesse vengono testate per il fitting geometrico.
        - Il footprint orientato deve entrare per almeno il 70% dentro il poligono dell'ombra.
        - Collision-free rispetto agli altri oggetti già posizionati.
+    3. Vincolo di compatibilità dimensionale tra occludore e bersaglio.
     """
     if area is None:
         area = float(sp.area) if (sp is not None and not sp.is_empty) else 0.0
@@ -270,17 +362,10 @@ def compute_synthetic_ground_truth_hybrid(
     eff_road_car = max(road_f, 0.40 * roadside_f)
     eff_road_truck = max(road_f, 0.35 * roadside_f)
 
-    # 1. Preservazione degli ostacoli reali nuScenes annotati
-    # Mantiene TUTTI gli ostacoli reali annotati a meno che non siano in cortili totalmente isolati
+    # 1. Preservazione INCONDIZIONATA degli ostacoli reali nuScenes annotati.
+    # Il gating fisico si applica solo alle label sintetiche (zone vuote), mai a oggetti realmente osservati.
     if gt_raw_6 is not None and np.sum(gt_raw_6) > 0:
-        gt_neuro_6 = np.array(gt_raw_6, dtype=np.float32)
-        # Se la zona è completamente sperduta (niente asfalto e lontana più di 5m dalla strada), inibisce
-        if eff_road_car < 0.04 and roadside_f < 0.05:
-            gt_neuro_6[0] = 0.0
-        if eff_road_truck < 0.04 and roadside_f < 0.05:
-            gt_neuro_6[1] = 0.0
-        if np.sum(gt_neuro_6) > 0:
-            return gt_neuro_6, placed_objects
+        return np.array(gt_raw_6, dtype=np.float32), placed_objects
 
     if sp is None or sp.is_empty or area < 0.1:
         return gt_neuro_6, placed_objects
@@ -317,6 +402,11 @@ def compute_synthetic_ground_truth_hybrid(
     if obb_w <= 2.4 and area >= 0.5:
         valid_classes.append(5)  # Barriera
 
+    # Filtro di compatibilità dimensionale dell'occludore
+    valid_classes = apply_occluder_compatibility_filter(
+        valid_classes, occluder_name=occluder_name, occluder_wlh=occluder_wlh, enabled=use_occluder_filter
+    )
+
     if not valid_classes:
         return gt_neuro_6, placed_objects
 
@@ -328,9 +418,11 @@ def compute_synthetic_ground_truth_hybrid(
         wlh = CLASS_WLH.get(class_idx, [1.9, 4.5, 1.5])
         obj_name = NUSC_NAMES[class_idx]
         fits = False
+        cur_min_dist = 0.8 if class_idx == 5 else min_dist
 
         # Primo tentativo: baricentro / representative_point
-        if not placed_objects:
+        can_try_center = (not placed_objects) or (class_idx == 5 and all(sample_poly.representative_point().distance(op[2]) > cur_min_dist for op in placed_objects))
+        if can_try_center:
             pt = sample_poly.representative_point()
             cx, cy = float(pt.x), float(pt.y)
             yaw = float(np.arctan2(cy, cx))
@@ -340,8 +432,9 @@ def compute_synthetic_ground_truth_hybrid(
             R = np.array([[c_y, -s_y], [s_y, c_y]])
             footprint = ShapelyPolygon(np.dot(corners, R.T) + [cx, cy])
 
-            dist_ok = all(pt.distance(op if isinstance(op, ShapelyPoint) else ShapelyPoint(op[0], op[1])) > min_dist for op in ext_pts)
-            if dist_ok and sp.intersection(footprint).area >= footprint.area * fit_threshold:
+            dist_ok = all(pt.distance(op if isinstance(op, ShapelyPoint) else ShapelyPoint(op[0], op[1])) > cur_min_dist for op in ext_pts)
+            collides = any(footprint.intersects(op_footprint) for _, _, _, _, _, op_footprint in [(None, None, None, None, None, ShapelyPolygon(np.dot(np.array([[op[4][1]/2, op[4][0]/2], [op[4][1]/2, -op[4][0]/2], [-op[4][1]/2, -op[4][0]/2], [-op[4][1]/2, op[4][0]/2]]), np.array([[np.cos(op[3]), -np.sin(op[3])], [np.sin(op[3]), np.cos(op[3])]]).T) + [op[2].x, op[2].y])) for op in placed_objects])
+            if dist_ok and (not collides) and sp.intersection(footprint).area >= footprint.area * fit_threshold:
                 gt_neuro_6[class_idx] = 1.0
                 placed_objects.append((class_idx, obj_name, pt, yaw, wlh))
                 fits = True
@@ -349,8 +442,9 @@ def compute_synthetic_ground_truth_hybrid(
         # Tentativi casuali se il baricentro fallisce o è occupato
         if not fits:
             attempts = 0
+            cur_max_attempts = max_attempts * 2 if class_idx == 5 else max_attempts
             np.random.seed(int(area * 100) + int(dist * 100) + class_idx)
-            while attempts < max_attempts:
+            while attempts < cur_max_attempts:
                 pt_x = np.random.uniform(minx, maxx)
                 pt_y = np.random.uniform(miny, maxy)
                 pt_test = ShapelyPoint(pt_x, pt_y)
@@ -363,10 +457,9 @@ def compute_synthetic_ground_truth_hybrid(
                     R = np.array([[c_y, -s_y], [s_y, c_y]])
                     footprint = ShapelyPolygon(np.dot(corners, R.T) + [cx, cy])
 
-                    dist_ok_placed = all(pt_test.distance(op[2]) > min_dist for op in placed_objects)
-                    dist_ok_ext = all(pt_test.distance(op if isinstance(op, ShapelyPoint) else ShapelyPoint(op[0], op[1])) > min_dist for op in ext_pts)
-
-                    if dist_ok_placed and dist_ok_ext and sp.intersection(footprint).area >= footprint.area * fit_threshold:
+                    dist_ok = all(pt_test.distance(op if isinstance(op, ShapelyPoint) else ShapelyPoint(op[0], op[1])) > cur_min_dist for op in ext_pts)
+                    collides = any(footprint.intersects(op_footprint) for _, _, _, _, _, op_footprint in [(None, None, None, None, None, ShapelyPolygon(np.dot(np.array([[op[4][1]/2, op[4][0]/2], [op[4][1]/2, -op[4][0]/2], [-op[4][1]/2, -op[4][0]/2], [-op[4][1]/2, op[4][0]/2]]), np.array([[np.cos(op[3]), -np.sin(op[3])], [np.sin(op[3]), np.cos(op[3])]]).T) + [op[2].x, op[2].y])) for op in placed_objects])
+                    if dist_ok and (not collides) and sp.intersection(footprint).area >= footprint.area * fit_threshold:
                         gt_neuro_6[class_idx] = 1.0
                         placed_objects.append((class_idx, obj_name, pt_test, yaw, wlh))
                         fits = True
@@ -393,7 +486,10 @@ def compute_synthetic_ground_truth(
     sp_sample=None,
     max_attempts=20,
     fit_threshold=0.85,
-    mode="geometric"
+    mode="geometric",
+    occluder_name=None,
+    occluder_wlh=None,
+    use_occluder_filter=True
 ):
     """
     Punto di accesso unico e standardizzato per il calcolo della Ground Truth Sintetica.
@@ -412,7 +508,10 @@ def compute_synthetic_ground_truth(
             area=area,
             dist=dist,
             gt_raw_6=gt_raw_6,
-            sp_sample=sp_sample
+            sp_sample=sp_sample,
+            occluder_name=occluder_name,
+            occluder_wlh=occluder_wlh,
+            use_occluder_filter=use_occluder_filter
         )
     elif mode == "hybrid":
         return compute_synthetic_ground_truth_hybrid(
@@ -428,7 +527,10 @@ def compute_synthetic_ground_truth(
             min_dist=min_dist,
             sp_sample=sp_sample,
             max_attempts=max_attempts,
-            fit_threshold=fit_threshold if fit_threshold != 0.85 else 0.80
+            fit_threshold=fit_threshold if fit_threshold != 0.85 else 0.80,
+            occluder_name=occluder_name,
+            occluder_wlh=occluder_wlh,
+            use_occluder_filter=use_occluder_filter
         )
     else:
         return compute_synthetic_ground_truth_geometric(
@@ -443,7 +545,10 @@ def compute_synthetic_ground_truth(
             min_dist=min_dist,
             sp_sample=sp_sample,
             max_attempts=max_attempts,
-            fit_threshold=fit_threshold
+            fit_threshold=fit_threshold,
+            occluder_name=occluder_name,
+            occluder_wlh=occluder_wlh,
+            use_occluder_filter=use_occluder_filter
         )
 
 

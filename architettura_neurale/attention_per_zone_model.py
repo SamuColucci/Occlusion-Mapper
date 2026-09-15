@@ -177,7 +177,7 @@ class AttentionPerZoneModel(nn.Module):
             nn.Linear(64, num_classes)
         )
 
-    def forward(self, patch: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
+    def forward(self, patch: torch.Tensor, scalars: torch.Tensor, occluder_mask: torch.Tensor = None) -> torch.Tensor:
         # Regola i volumi iniziali degli 11 canali di input
         x = self.input_se(patch)
 
@@ -207,15 +207,56 @@ class AttentionPerZoneModel(nn.Module):
 
         # Applica il classificatore ai dati combinati per ottenere i logit finali (end-to-end)
         logits = self.classifier(combined)
+
+        # Modulo Neuro-Simbolico Integrato (Logit Masking Differenziabile):
+        # Se viene fornito il vincolo dell'occludore, applica la maschera ontologica direttamente ai logit
+        if occluder_mask is not None:
+            if occluder_mask.dim() == 1:
+                occluder_mask = occluder_mask.unsqueeze(0)
+            logits = logits + (1.0 - occluder_mask.to(logits.device)) * (-10000.0)
+
         return logits
 
-    def forward_vru(self, patch: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def build_compatibility_mask(occluder_name=None, occluder_wlh=None, device=None) -> torch.Tensor:
         """
-        Output calibrato a 4 macro-classi
+        Modulo Simbolico Integrato: genera il tensore di consistenza fisica M in {0, 1}^6:
+        - Pedone / Ciclista / Sagoma stretta (w < 0.95m): ammessi solo VRU (Pedoni/Bici, indici 2 e 4)
+        - Auto standard (h < 2.5m, non furgone pesante, non muro): escluso Camion/Bus (indice 1)
+        - Mezzo pesante / Muro statico: ammette tutte le categorie
+        """
+        # [Auto(0), Camion(1), Pedone(2), Moto(3), Bici(4), Barriera(5)]
+        mask = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        if occluder_name is not None or occluder_wlh is not None:
+            name_l = str(occluder_name).lower() if occluder_name is not None else ""
+            occ_h = float(occluder_wlh[2]) if (occluder_wlh is not None and len(occluder_wlh) >= 3) else None
+            occ_w = float(occluder_wlh[0]) if (occluder_wlh is not None and len(occluder_wlh) >= 3) else None
+
+            is_human_or_bike = any(k in name_l for k in ["human", "pedestrian", "bicycle", "motorcycle"])
+            is_narrow = (occ_w is not None and occ_w < 0.95)
+            is_heavy = any(k in name_l for k in ["truck", "bus", "trailer", "construction"])
+            is_manmade = ("static.manmade" in name_l or "building" in name_l or "wall" in name_l)
+            is_tall = (occ_h is not None and occ_h >= 1.50) # Calibrato: veicoli >= 1.50m (SUV, crossover, van, furgoni) possono celare mezzi commerciali leggeri
+
+            if is_human_or_bike or is_narrow:
+                # Sagoma stretta: ammessi solo Pedone (2) e Bici (4)
+                mask = [0.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+            elif not (is_heavy or is_manmade or is_tall):
+                # Berlina molto bassa (h < 1.50m): quota LiDAR a 1.84m esclude fisicamente Camion/Bus (1)
+                mask = [1.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+
+        tensor_m = torch.tensor(mask, dtype=torch.float32)
+        if device is not None:
+            tensor_m = tensor_m.to(device)
+        return tensor_m
+
+    def forward_vru(self, patch: torch.Tensor, scalars: torch.Tensor, occluder_mask: torch.Tensor = None) -> torch.Tensor:
+        """
+        Output calibrato a 4 macro-classi con vincolo neuro-simbolico incorporato:
         [0: Auto, 1: Camion/Bus, 2: VRU (Pedoni+Moto+Bici), 3: Barriera]
         """
-        # Esegue il forward pass e ottiene i punteggi finali
-        logits_6 = self.forward(patch, scalars)
+        # Esegue il forward pass e ottiene i punteggi finali mascherati
+        logits_6 = self.forward(patch, scalars, occluder_mask=occluder_mask)
         # Applica la sigmoide per ottenere le probabilità percentuali
         probs_6 = torch.sigmoid(logits_6)
         # Prende le probabilità delle 3 classi VRU e ne fa il massimo per ottenere un'unica probabilità per la macro-classe VRU

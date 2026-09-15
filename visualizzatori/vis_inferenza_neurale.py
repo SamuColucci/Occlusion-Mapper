@@ -43,6 +43,7 @@ from ground_truth.ground_truth_extractor import (
     extract_ground_truth_masks,
     rasterize_polygon
 )
+from ground_truth.ground_truth_extractor_synthetic import apply_occluder_compatibility_filter
 from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
 
 SYNC_FILE = os.path.join(ROOT_DIR, "scratch", "sync_frame.txt")
@@ -52,16 +53,32 @@ VOXEL_SIZE = 0.4
 
 MODEL_CONFIGS = {
     "NEURO_SIMB": {
-        "title": "Anticipazione Neuro-Simbolica (Spazio 3D + Mappa HD)",
-        "short": "★ NEURO-SIMB.",
+        "title": "Anticipazione Neuro-Simbolica Ibrida (Spazio 3D + HD-Map)",
+        "short": "★ IBRIDO (SPAZIO+HDMAP)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
         "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_geometric.pth"),
         "badge_color": "#2563EB",
         "badge_bg": "#DBEAFE",
     },
+    "GEOMETRIC": {
+        "title": "Supervisione Geometrica (Fitting 3D)",
+        "short": "★ GEOMETRICO (FITTING 3D)",
+        "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_geometric.pth"),
+        "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
+        "badge_color": "#0284C7",
+        "badge_bg": "#E0F2FE",
+    },
+    "SEMANTIC": {
+        "title": "Supervisione Semantica (Regole Naïve HD-Map)",
+        "short": "★ SEMANTICO (REGOLE HDMAP)",
+        "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_semantic.pth"),
+        "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
+        "badge_color": "#E11D48",
+        "badge_bg": "#FFF1F2",
+    },
     "REAL_GT": {
         "title": "Supervisione Reale Completa (nuScenes 3D)",
-        "short": "GT REALE",
+        "short": "GT REALE (COMPLETA)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth"),
         "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
         "badge_color": "#0D9488",
@@ -69,7 +86,7 @@ MODEL_CONFIGS = {
     },
     "POS_ONLY": {
         "title": "Supervisione Solo Zone Piene (Positives-Only)",
-        "short": "SOLO POSITIVI",
+        "short": "SOLO POSITIVI (ZONE PIENE)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_positive_only.pth"),
         "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth"),
         "badge_color": "#D97706",
@@ -77,8 +94,8 @@ MODEL_CONFIGS = {
     }
 }
 MODEL_CONFIGS["HYBRID"] = MODEL_CONFIGS["NEURO_SIMB"]
-MODEL_CONFIGS["GEOMETRIC"] = MODEL_CONFIGS["NEURO_SIMB"]
-MODEL_CONFIGS["SEMANTIC"] = MODEL_CONFIGS["NEURO_SIMB"]
+MODEL_CONFIGS["GEOMETRICA"] = MODEL_CONFIGS["GEOMETRIC"]
+MODEL_CONFIGS["SEMANTICA"] = MODEL_CONFIGS["SEMANTIC"]
 
 
 class NeuralInferenceVisualizer:
@@ -96,11 +113,15 @@ class NeuralInferenceVisualizer:
         self.total_frames = self.adapter.get_num_samples()
         self.current_idx = 0
         init_key = initial_model.upper()
-        if init_key in ["GEOMETRIC", "SEMANTIC", "HYBRID", "NEURO_SIMB"]:
+        if init_key in ["HYBRID", "IBRIDO", "NEURO_SIMB", "NEURO"]:
             self.current_model_key = "NEURO_SIMB"
+        elif init_key in ["GEOMETRIC", "GEOMETRICA", "GEOM"]:
+            self.current_model_key = "GEOMETRIC"
+        elif init_key in ["SEMANTIC", "SEMANTICA", "SEM"]:
+            self.current_model_key = "SEMANTIC"
         elif init_key in ["REAL", "REALE", "REAL_GT"]:
             self.current_model_key = "REAL_GT"
-        elif init_key in ["POS", "POSITIVES", "POS_ONLY"]:
+        elif init_key in ["POS", "POSITIVES", "POS_ONLY", "SOLO_POSITIVI"]:
             self.current_model_key = "POS_ONLY"
         else:
             self.current_model_key = init_key if init_key in MODEL_CONFIGS else "NEURO_SIMB"
@@ -274,22 +295,6 @@ class NeuralInferenceVisualizer:
         if model is None:
             return
 
-        target_masks = extract_ground_truth_masks(self.frame_data)
-        semantic_map = self.frame_data['semantic_map']
-        drivable_mask = np.maximum(semantic_map['drivable_area'], semantic_map.get('carpark_area', np.zeros_like(semantic_map['drivable_area'])))
-        walkway_mask = semantic_map.get('walkway', np.zeros_like(drivable_mask))
-        ped_crossing_mask = semantic_map.get('ped_crossing', np.zeros_like(drivable_mask))
-
-        input_channels = [
-            self.frame_data.get('lidar_bev', np.zeros((GRID_DIM, GRID_DIM))),
-            self.frame_data.get('occlusion_mask', np.zeros((GRID_DIM, GRID_DIM))),
-            drivable_mask,
-            walkway_mask,
-            ped_crossing_mask
-        ] + list(target_masks)
-
-        input_tensor = torch.tensor(np.stack(input_channels, axis=0), dtype=torch.float32)
-
         occ_file = os.path.join("extracted_occlusions", f"{self.sample_token}.json")
         if not os.path.exists(occ_file):
             return
@@ -297,15 +302,70 @@ class NeuralInferenceVisualizer:
         with open(occ_file, "r") as f:
             occs = json.load(f)["occlusions"]
 
+        # Maschera circolare metrica a 25m per tagliare rigorosamente TUTTI gli 11 canali di input
+        r_grid = np.arange(GRID_DIM)
+        gy, gx = np.meshgrid(r_grid, r_grid)
+        mask_25m = (np.sqrt((gx - 99.5)**2 + (gy - 99.5)**2) * VOXEL_SIZE <= self.max_range).astype(np.float32)
+        circle_25m = Point(0, 0).buffer(self.max_range)
+
+        # 1. Canale 0: LiDAR Density BEV entro 25m
+        lidar_bev = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
+        points = self.frame_data.get("points", np.zeros((0, 3)))
+        if len(points) > 0:
+            for px_m, py_m in points[:, :2]:
+                px = int((px_m + GRID_RANGE) / VOXEL_SIZE)
+                py = int((GRID_RANGE - py_m) / VOXEL_SIZE)
+                if 0 <= px < GRID_DIM and 0 <= py < GRID_DIM:
+                    lidar_bev[py, px] = 1.0
+        lidar_bev = lidar_bev * mask_25m
+
+        # 2. Canale 1: Ombre Raycasting cumulative entro 25m
+        occlusion_mask = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
+        for occ in occs:
+            pts = occ.get("polygon_points_m", [])
+            if len(pts) >= 3:
+                sp_occ = ShapelyPolygon(pts)
+                if not sp_occ.is_valid:
+                    sp_occ = sp_occ.buffer(0)
+                sp_occ_25 = sp_occ.intersection(circle_25m)
+                if not sp_occ_25.is_empty and sp_occ_25.area >= 0.1:
+                    sub_geoms = list(sp_occ_25.geoms) if sp_occ_25.geom_type == 'MultiPolygon' else [sp_occ_25]
+                    for sg in sub_geoms:
+                        coords = np.array(sg.exterior.coords)[:-1]
+                        m = rasterize_polygon(coords)
+                        occlusion_mask = np.maximum(occlusion_mask, m)
+        occlusion_mask = occlusion_mask * mask_25m
+
+        # 3. Canali 2, 3, 4: HD Map entro 25m
+        semantic_map = self.frame_data['semantic_map']
+        drivable_mask = (np.maximum(semantic_map['drivable_area'], semantic_map.get('carpark_area', np.zeros_like(semantic_map['drivable_area'])))) * mask_25m
+        walkway_mask = (semantic_map.get('walkway', np.zeros_like(drivable_mask))) * mask_25m
+        ped_crossing_mask = (semantic_map.get('ped_crossing', np.zeros_like(drivable_mask))) * mask_25m
+
+        # 4. Canali 5-10: Ostacoli visibili nuScenes entro 25m
+        target_masks = extract_ground_truth_masks(self.frame_data) * mask_25m
+
+        input_channels = [
+            lidar_bev,
+            occlusion_mask,
+            drivable_mask,
+            walkway_mask,
+            ped_crossing_mask
+        ] + list(target_masks)
+
+        input_tensor = torch.tensor(np.stack(input_channels, axis=0), dtype=torch.float32)
+
         start_time = time.perf_counter()
         cat_names_4 = ["Auto", "Camion/Bus", "VRU (Pedoni)", "Barriera"]
-
-        # Considera tutte le ombre che hanno una porzione visibile entro il raggio d'analisi (25m)
-        circle_25m = Point(0, 0).buffer(self.max_range - 0.4)
 
         # Mappa delle distanze euclidee dalla carreggiata (drivable area) in metri
         import cv2
         dt_road_map = cv2.distanceTransform((1 - drivable_mask).astype(np.uint8), cv2.DIST_L2, 3) * VOXEL_SIZE
+
+        # Mappa rapida per estrarre le dimensioni 3D dell'occludore se noto
+        boxes_by_token = {b.token: b for b in self.frame_data.get('boxes', [])}
+        for sb in getattr(self, 'static_boxes', []):
+            boxes_by_token[sb.token] = sb
 
         for occ in occs:
             pts = occ.get("polygon_points_m", [])
@@ -316,94 +376,112 @@ class NeuralInferenceVisualizer:
 
             sp = ShapelyPolygon(poly_xy)
             if not sp.is_valid or sp.area <= 0.01:
+                sp = sp.buffer(0)
+            if not sp.is_valid or sp.area <= 0.01:
                 continue
 
-            # Filtro rigoroso: l'ombra deve penetrare entro l'area BEV visibile (25m)
+            # Filtro rigoroso: l'ombra viene ritagliata esattamente entro la circonferenza dei 25m
             poly_vis = sp.intersection(circle_25m)
-            if poly_vis.is_empty or poly_vis.area < 0.02:
+            if poly_vis.is_empty or poly_vis.area < 0.1:
                 continue
 
-            occ_mask = rasterize_polygon(pts)
-            tot = np.sum(occ_mask)
-            road_f = np.sum(occ_mask * drivable_mask) / tot if tot > 0 else 0
-            side_f = np.sum(occ_mask * walkway_mask) / tot if tot > 0 else 0
-            cross_f = np.sum(occ_mask * ped_crossing_mask) / tot if tot > 0 else 0
-            terr_f = max(0.0, 1.0 - (road_f + side_f + cross_f))
-            area = float(occ.get("area_sqm", 0.0))
-            dist = float(occ.get("distance_m", 0.0))
+            occ_name = occ.get('object_name', None)
+            occ_tok = occ.get('object_token', None)
+            b_obj = boxes_by_token.get(occ_tok, None)
+            if b_obj is not None:
+                if hasattr(b_obj, 'wlh'):
+                    occ_wlh = b_obj.wlh
+                elif hasattr(b_obj, 'max_x'):
+                    occ_wlh = [b_obj.max_x - b_obj.min_x, b_obj.max_y - b_obj.min_y, b_obj.max_z - b_obj.min_z]
+                else:
+                    occ_wlh = None
+                if not occ_name and hasattr(b_obj, 'name'):
+                    occ_name = b_obj.name
+            else:
+                occ_wlh = None
 
-            # Prossimità al bordo strada (distanza minima in metri dalla carreggiata):
-            min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
-            # Accosto / sosta bordo strada: 1.0 se a contatto/curb, decade entro 2.5m (spazio stallo/accosto)
-            roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
+            sub_geoms = list(poly_vis.geoms) if poly_vis.geom_type == 'MultiPolygon' else [poly_vis]
+            for poly_main in sub_geoms:
+                if poly_main.area < 0.1:
+                    continue
 
-            # Pipeline ufficiale esatta di ritaglio patch (allineata a evaluate_final_official.py)
-            px_x = np.clip(((poly_xy[:, 0] + GRID_RANGE) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
-            px_y = np.clip(((GRID_RANGE - poly_xy[:, 1]) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
-            xmin, xmax = max(0, np.min(px_x) - 2), min(GRID_DIM - 1, np.max(px_x) + 2)
-            ymin, ymax = max(0, np.min(px_y) - 2), min(GRID_DIM - 1, np.max(px_y) + 2)
-            if xmax <= xmin or ymax <= ymin:
-                continue
+                vis_coords = np.array(poly_main.exterior.coords)[:-1]
+                if len(vis_coords) < 3:
+                    continue
 
-            patch = input_tensor[:, ymin:ymax+1, xmin:xmax+1]
-            patch_res = F.interpolate(patch.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).to(self.device)
+                # Calcolo feature semantiche e geometriche STRETTAMENTE sulla porzione visibile entro 25m
+                occ_mask = rasterize_polygon(vis_coords)
+                tot = np.sum(occ_mask)
+                road_f = np.sum(occ_mask * drivable_mask) / tot if tot > 0 else 0
+                side_f = np.sum(occ_mask * walkway_mask) / tot if tot > 0 else 0
+                cross_f = np.sum(occ_mask * ped_crossing_mask) / tot if tot > 0 else 0
+                terr_f = max(0.0, 1.0 - (road_f + side_f + cross_f))
+                area = float(poly_main.area)
+                dist = float(np.hypot(poly_main.centroid.x, poly_main.centroid.y))
 
-            if sp.is_valid and sp.area > 0.01:
-                mrr = sp.minimum_rotated_rectangle
+                # Prossimità al bordo strada
+                min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
+                roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
+
+                # Pipeline di ritaglio patch calcolata strettamente sui vertici entro 25m
+                px_x = np.clip(((vis_coords[:, 0] + GRID_RANGE) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
+                px_y = np.clip(((GRID_RANGE - vis_coords[:, 1]) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
+                xmin, xmax = max(0, np.min(px_x) - 2), min(GRID_DIM - 1, np.max(px_x) + 2)
+                ymin, ymax = max(0, np.min(px_y) - 2), min(GRID_DIM - 1, np.max(px_y) + 2)
+                if xmax <= xmin or ymax <= ymin:
+                    continue
+
+                patch = input_tensor[:, ymin:ymax+1, xmin:xmax+1]
+                patch_res = F.interpolate(patch.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).to(self.device)
+
+                # Calcolo OBB strettamente sulla geometria 25m
+                mrr = poly_main.minimum_rotated_rectangle
                 mrr_coords = np.array(mrr.exterior.coords)[:-1]
                 e1 = np.linalg.norm(mrr_coords[0] - mrr_coords[1])
                 e2 = np.linalg.norm(mrr_coords[1] - mrr_coords[2])
                 obb_w, obb_l = float(min(e1, e2)), float(max(e1, e2))
-            else:
-                obb_w, obb_l = 0.5, 0.5
 
-            # Vettore scalari: [area, dist, width, length, road_f, side_f, cross_f, roadside_f, terr_f]
-            scalars = torch.tensor([[area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]], dtype=torch.float32).to(self.device)
+                # Vettore scalari: [area, dist, width, length, road_f, side_f, cross_f, roadside_f, terr_f]
+                scalars = torch.tensor([[area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]], dtype=torch.float32).to(self.device)
 
-            with torch.no_grad():
-                out_6 = torch.sigmoid(model(patch_res, scalars)).squeeze(0).cpu().numpy()
+                occluder_mask = AttentionPerZoneModel.build_compatibility_mask(occ_name, occ_wlh, device=self.device)
+                with torch.no_grad():
+                    out_6 = torch.sigmoid(model(patch_res, scalars, occluder_mask=occluder_mask)).squeeze(0).cpu().numpy()
 
-            # Mappatura standard tesi a 4 macro-classi
-            p4 = np.array([
-                out_6[0],
-                out_6[1],
-                max(out_6[2], out_6[3], out_6[4]),
-                out_6[5]
-            ], dtype=np.float32)
+                # Mappatura pura dell'output del modello a 4 macro-classi (nessuna modifica post-hoc)
+                p4 = np.array([
+                    out_6[0],
+                    out_6[1],
+                    max(out_6[2], out_6[3], out_6[4]),
+                    out_6[5]
+                ], dtype=np.float32)
 
-            max_class_idx = int(np.argmax(p4))
-            max_prob = float(p4[max_class_idx])
-            pred_class = cat_names_4[max_class_idx]
 
-            # Selezione del poligono principale per posizionare l'icona esattamente nella porzione visibile
-            if poly_vis.geom_type == 'Polygon':
-                poly_main = poly_vis
-            elif poly_vis.geom_type in ['MultiPolygon', 'GeometryCollection']:
-                polys = [g for g in poly_vis.geoms if g.geom_type == 'Polygon']
-                poly_main = max(polys, key=lambda g: g.area) if polys else sp
-            else:
-                poly_main = sp
+                max_class_idx = int(np.argmax(p4))
+                max_prob = float(p4[max_class_idx])
+                pred_class = cat_names_4[max_class_idx]
 
-            pt = poly_main.representative_point()
-            cx_m, cy_m = float(pt.x), float(pt.y)
+                pt = poly_main.representative_point()
+                cx_m, cy_m = float(pt.x), float(pt.y)
 
-            self.inferred_occlusions.append({
-                "occ": occ,
-                "poly_xy": poly_xy,
-                "center": (cx_m, cy_m),
-                "area": area,
-                "dist": dist,
-                "road_f": road_f,
-                "side_f": side_f,
-                "cross_f": cross_f,
-                "roadside_f": roadside_f,
-                "min_d_road": min_d_road,
-                "probs_4": p4,
-                "pred_class": pred_class,
-                "pred_idx": max_class_idx,
-                "risk_score": max_prob,
-                "is_hazard": True
-            })
+                self.inferred_occlusions.append({
+                    "occ": occ,
+                    "poly_xy": vis_coords,
+                    "center": (cx_m, cy_m),
+                    "area": area,
+                    "dist": dist,
+                    "road_f": road_f,
+                    "side_f": side_f,
+                    "cross_f": cross_f,
+                    "roadside_f": roadside_f,
+                    "min_d_road": min_d_road,
+                    "scalars": scalars.squeeze(0).cpu().numpy(),
+                    "probs_4": p4,
+                    "pred_class": pred_class,
+                    "max_prob": max_prob,
+                    "risk_score": float(np.max(p4)),
+                    "is_hazard": bool(np.max(p4) >= 0.35)
+                })
 
         self.inference_latency_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -911,11 +989,11 @@ class NeuralInferenceVisualizer:
         # =====================================================================
         # 5. MENU A TENDINA & CASELLA DI SALTO FRAME IN ALTO
         # =====================================================================
-        ax_dd = self.fig.add_axes([0.575, 0.938, 0.270, 0.036])
+        ax_dd = self.fig.add_axes([0.565, 0.938, 0.280, 0.036])
         arrow = "▲" if getattr(self, 'dropdown_open', False) else "▼"
         curr_lbl = cfg_curr.get("short", self.current_model_key)
         self.btn_mode = Button(ax_dd, f"Modello: {curr_lbl}  {arrow}", color='#F8FAFC', hovercolor='#E2E8F0')
-        self.btn_mode.label.set_fontsize(8.2)
+        self.btn_mode.label.set_fontsize(7.8)
         self.btn_mode.label.set_fontweight('bold')
         self.btn_mode.label.set_color(c_border)
         self.btn_mode.label.set_ha('center')
@@ -954,7 +1032,7 @@ class NeuralInferenceVisualizer:
         self._hide_dropdown_menu()
         self.dropdown_open = True
 
-        self.ax_menu = self.fig.add_axes([0.575, 0.816, 0.270, 0.120], facecolor='#FFFFFF', zorder=100)
+        self.ax_menu = self.fig.add_axes([0.565, 0.748, 0.280, 0.188], facecolor='#FFFFFF', zorder=100)
         self.ax_menu.set_xticks([])
         self.ax_menu.set_yticks([])
         for spine in self.ax_menu.spines.values():
@@ -962,12 +1040,14 @@ class NeuralInferenceVisualizer:
             spine.set_linewidth(1.3)
 
         modes = [
-            ("NEURO_SIMB", "1. ★ NEURO-SIMBOLICO (Spazio 3D + HD-Map)"),
-            ("REAL_GT", "2. GT REALE (Supervisione Completa)"),
-            ("POS_ONLY", "3. SOLO POSITIVI (Zone con Oggetto)")
+            ("NEURO_SIMB", "1. ★ Modello Ibrido (Spazio 3D + HD-Map)"),
+            ("GEOMETRIC", "2. ★ Modello Geometrico (Fitting 3D)"),
+            ("SEMANTIC", "3. ★ Modello Semantico (Regole Naïve)"),
+            ("REAL_GT", "4. Modello GT Reale (Supervisione Completa)"),
+            ("POS_ONLY", "5. Modello Solo Positivi (Zone Piene)")
         ]
 
-        y_offsets = [0.080, 0.041, 0.002]
+        y_offsets = [0.148, 0.111, 0.074, 0.037, 0.001]
         self.menu_buttons = []
         for (m_key, m_lbl), y_off in zip(modes, y_offsets):
             is_active = (self.current_model_key == m_key)
@@ -975,13 +1055,13 @@ class NeuralInferenceVisualizer:
             bg_col = '#EFF6FF' if is_active else '#FFFFFF'
             txt_col = '#1D4ED8' if is_active else '#334155'
 
-            ax_item = self.fig.add_axes([0.577, 0.816 + y_off, 0.266, 0.036], zorder=101)
+            ax_item = self.fig.add_axes([0.567, 0.748 + y_off, 0.276, 0.035], zorder=101)
             btn = Button(ax_item, prefix + m_lbl, color=bg_col, hovercolor='#E0F2FE')
-            btn.label.set_fontsize(8.0)
+            btn.label.set_fontsize(7.8)
             btn.label.set_fontweight('bold' if is_active else 'normal')
             btn.label.set_color(txt_col)
             btn.label.set_ha('left')
-            btn.label.set_x(0.04)
+            btn.label.set_x(0.035)
             btn.on_clicked(lambda ev, k=m_key: self.select_model(k))
             self.menu_buttons.append((ax_item, btn, m_key))
 
@@ -1035,7 +1115,7 @@ class NeuralInferenceVisualizer:
             if self.current_idx > 0:
                 self.load_frame(self.current_idx - 1, broadcast=True)
         elif event.key in ['m', 'M', 'b', 'B']:
-            cycle = ["NEURO_SIMB", "REAL_GT", "POS_ONLY"]
+            cycle = ["NEURO_SIMB", "GEOMETRIC", "SEMANTIC", "REAL_GT", "POS_ONLY"]
             cur_i = cycle.index(self.current_model_key) if self.current_model_key in cycle else 0
             next_m = cycle[(cur_i + 1) % len(cycle)]
             self.select_model(next_m)
@@ -1108,9 +1188,9 @@ class NeuralInferenceVisualizer:
                 allerta_str = "SICURA (Spazio Libero)"
 
             # Calcolo composizione del suolo disgiunta (somma = 100%)
-            rf_pct = int(round(meta['road_f'] * 100))
-            sf_pct = int(round(meta['side_f'] * 100))
-            cf_pct = int(round(meta.get('cross_f', 0) * 100))
+            rf_pct = int(round(meta.get('road_f', 0.0) * 100))
+            sf_pct = int(round(meta.get('side_f', 0.0) * 100))
+            cf_pct = int(round(meta.get('cross_f', 0.0) * 100))
             tf_pct = max(0, 100 - (rf_pct + sf_pct + cf_pct))
 
             suolo_parts = []
@@ -1160,9 +1240,9 @@ def main():
     parser = argparse.ArgumentParser(description="Visualizzatore Tesi Inferenza Neurale nelle Zone Occluse")
     parser.add_argument("frame", nargs="?", type=int, default=1, help="Numero del frame iniziale (1-404)")
     parser.add_argument("--model", "-m",
-                        choices=["NEURO_SIMB", "REAL_GT", "POS_ONLY", "HYBRID", "GEOMETRIC", "SEMANTIC"],
+                        choices=["NEURO_SIMB", "GEOMETRIC", "SEMANTIC", "GEOMETRICA", "SEMANTICA", "REAL_GT", "POS_ONLY", "HYBRID"],
                         default="NEURO_SIMB",
-                        help="Modello neurale iniziale da caricare (NEURO_SIMB, REAL_GT o POS_ONLY)")
+                        help="Modello neurale iniziale da caricare ('NEURO_SIMB', 'GEOMETRIC', 'SEMANTIC', 'REAL_GT', 'POS_ONLY')")
     parser.add_argument("--save", action="store_true", help="Salva screenshot ad alta risoluzione 300 DPI ed esce")
     args = parser.parse_args()
 

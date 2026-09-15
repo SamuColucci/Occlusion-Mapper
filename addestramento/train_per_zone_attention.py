@@ -24,6 +24,7 @@ from ground_truth.ground_truth_extractor import extract_ground_truth_masks, rast
 from ground_truth.ground_truth_extractor_synthetic import compute_synthetic_ground_truth
 from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
 from architettura_neurale.loss_functions import AsymmetricLoss
+from shapely.geometry import Point as ShapelyPoint, Polygon as ShapelyPoly
 
 
 def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric", checkpoint_path=None, split="train", force_extract=False):
@@ -77,6 +78,7 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
         print(f"• Caricamento dataset dalla cache: {cache_path}...")
         cache_data = torch.load(cache_path)
         patches, scalars, targets = cache_data["patches"], cache_data["scalars"], cache_data["targets"]
+        masks = cache_data.get("masks", torch.ones_like(targets))
 
         # Se positives_only: filtra mantenendo SOLO le zone con almeno un ostacolo reale
         if gt_mode == "positives_only":
@@ -95,7 +97,7 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
         train_scenes = set(splits_dict.get('mini_train', []))
         val_scenes = set(splits_dict.get('mini_val', []))
 
-        patches_list, scalars_list, targets_list = [], [], []
+        patches_list, scalars_list, masks_list, targets_list = [], [], [], []
 
         for idx in range(num_samples):
             sample = adapter.all_samples[idx]
@@ -112,22 +114,6 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
 
             frame_data = adapter.get_sample_data(idx)
             token = frame_data["sample_token"]
-            
-            target_masks = extract_ground_truth_masks(frame_data)
-            semantic_map = frame_data['semantic_map']
-            drivable_mask = np.maximum(semantic_map['drivable_area'], semantic_map.get('carpark_area', np.zeros_like(semantic_map['drivable_area'])))
-            walkway_mask = semantic_map.get('walkway', np.zeros_like(drivable_mask))
-            ped_crossing_mask = semantic_map.get('ped_crossing', np.zeros_like(drivable_mask))
-
-            input_channels = [
-                frame_data.get('lidar_bev', np.zeros((200, 200))),
-                frame_data.get('occlusion_mask', np.zeros((200, 200))),
-                drivable_mask,
-                walkway_mask,
-                ped_crossing_mask
-            ] + list(target_masks)
-
-            input_tensor = torch.tensor(np.stack(input_channels, axis=0), dtype=torch.float32)
 
             occ_file = os.path.join("extracted_occlusions", f"{token}.json")
             if not os.path.exists(occ_file):
@@ -135,92 +121,174 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
             with open(occ_file) as f:
                 occs = json.load(f)["occlusions"]
 
+            # Maschera circolare metrica a 25m per tagliare rigorosamente TUTTI gli 11 canali di input
+            r_grid = np.arange(200)
+            gy, gx = np.meshgrid(r_grid, r_grid)
+            mask_25m = (np.sqrt((gx - 99.5)**2 + (gy - 99.5)**2) * 0.4 <= 25.0).astype(np.float32)
+            circle_25m = ShapelyPoint(0, 0).buffer(25.0)
+
+            # 1. Canale 0: LiDAR Density BEV entro 25m
+            lidar_bev = np.zeros((200, 200), dtype=np.float32)
+            points = frame_data.get("points", np.zeros((0, 3)))
+            if len(points) > 0:
+                for px_m, py_m in points[:, :2]:
+                    px = int((px_m + 40.0) / 0.4)
+                    py = int((40.0 - py_m) / 0.4)
+                    if 0 <= px < 200 and 0 <= py < 200:
+                        lidar_bev[py, px] = 1.0
+            lidar_bev = lidar_bev * mask_25m
+
+            # 2. Canale 1: Ombre Raycasting cumulative entro 25m
+            occlusion_mask = np.zeros((200, 200), dtype=np.float32)
+            for occ in occs:
+                pts = occ.get("polygon_points_m", [])
+                if len(pts) >= 3:
+                    sp_occ = ShapelyPoly(pts)
+                    if not sp_occ.is_valid:
+                        sp_occ = sp_occ.buffer(0)
+                    sp_occ_25 = sp_occ.intersection(circle_25m)
+                    if not sp_occ_25.is_empty and sp_occ_25.area >= 0.1:
+                        sub_geoms = list(sp_occ_25.geoms) if sp_occ_25.geom_type == 'MultiPolygon' else [sp_occ_25]
+                        for sg in sub_geoms:
+                            coords = np.array(sg.exterior.coords)[:-1]
+                            m = rasterize_polygon(coords)
+                            occlusion_mask = np.maximum(occlusion_mask, m)
+            occlusion_mask = occlusion_mask * mask_25m
+
+            # 3. Canali 2, 3, 4: HD Map entro 25m
+            semantic_map = frame_data['semantic_map']
+            drivable_mask = (np.maximum(semantic_map['drivable_area'], semantic_map.get('carpark_area', np.zeros_like(semantic_map['drivable_area'])))) * mask_25m
+            walkway_mask = (semantic_map.get('walkway', np.zeros_like(drivable_mask))) * mask_25m
+            ped_crossing_mask = (semantic_map.get('ped_crossing', np.zeros_like(drivable_mask))) * mask_25m
+
+            # 4. Canali 5-10: Ostacoli visibili nuScenes entro 25m
+            target_masks = extract_ground_truth_masks(frame_data) * mask_25m
+
+            input_channels = [
+                lidar_bev,
+                occlusion_mask,
+                drivable_mask,
+                walkway_mask,
+                ped_crossing_mask
+            ] + list(target_masks)
+
+            input_tensor = torch.tensor(np.stack(input_channels, axis=0), dtype=torch.float32)
+
             import cv2
             dt_road_map = cv2.distanceTransform((1 - drivable_mask).astype(np.uint8), cv2.DIST_L2, 3) * 0.4
+            boxes_by_token = {b.token: b for b in frame_data.get('boxes', [])}
 
             for occ in occs:
                 pts = occ.get("polygon_points_m", [])
                 pts_np = np.array(pts)
                 if len(pts_np) < 3:
                     continue
-                poly_xy = np.column_stack([pts_np[:, 1], pts_np[:, 0]])
+                poly_xy = pts_np[:, :2]
 
-                from shapely.geometry import Polygon as ShapelyPoly
                 sp = ShapelyPoly(poly_xy)
-
-                occ_mask = rasterize_polygon(pts)
-                tot = np.sum(occ_mask)
-                road_f = np.sum(occ_mask * drivable_mask) / tot if tot > 0 else 0
-                side_f = np.sum(occ_mask * walkway_mask) / tot if tot > 0 else 0
-                cross_f = np.sum(occ_mask * ped_crossing_mask) / tot if tot > 0 else 0
-                terr_f = max(0.0, 1.0 - (road_f + side_f + cross_f))
-                area = float(occ.get("area_sqm", 0.0))
-                dist = float(occ.get("distance_m", 0.0))
-
-                # Calcolo prossimità al bordo strada (accosto / sosta entro 2.5m)
-                min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
-                roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
-
-                # Step 1: Estrae la Ground Truth Reale nuScenes a 6 classi
-                gt_raw_6 = get_occlusion_ground_truth_target(target_masks, pts)
-
-                # Se positives_only e la zona e vuota, la saltiamo
-                if gt_mode == "positives_only" and np.sum(gt_raw_6) == 0:
+                if not sp.is_valid or sp.area <= 0.01:
+                    sp = sp.buffer(0)
+                if not sp.is_valid or sp.area <= 0.01:
                     continue
 
-                # Step 2: Calcolo del target in base alla modalita
-                if gt_mode in ["real", "positives_only"]:
-                    gt_target = np.array(gt_raw_6, dtype=np.float32)
-                else:
-                    gt_target, _ = compute_synthetic_ground_truth(
-                        sp=sp,
-                        road_f=road_f,
-                        side_f=side_f,
-                        cross_f=cross_f,
-                        roadside_f=roadside_f,
-                        area=area,
-                        dist=dist,
-                        gt_raw_6=gt_raw_6,
-                        mode=gt_mode
-                    )
-
-                px_x = np.clip(((poly_xy[:, 0] + 40.0) / 0.4).astype(int), 0, 199)
-                px_y = np.clip(((40.0 - poly_xy[:, 1]) / 0.4).astype(int), 0, 199)
-                xmin, xmax = max(0, np.min(px_x) - 2), min(199, np.max(px_x) + 2)
-                ymin, ymax = max(0, np.min(px_y) - 2), min(199, np.max(px_y) + 2)
-                if xmax <= xmin or ymax <= ymin:
+                # Vincolo rigoroso: l'ombra viene ritagliata esattamente entro i 25 metri
+                sp_25m = sp.intersection(circle_25m)
+                if sp_25m.is_empty or sp_25m.area < 0.1:
                     continue
 
-                patch = input_tensor[:, ymin:ymax+1, xmin:xmax+1]
-                patch_res = F.interpolate(patch.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).squeeze(0)
+                occ_name = occ.get("object_name", None)
+                occ_tok = occ.get("object_token", None)
+                b_obj = boxes_by_token.get(occ_tok, None)
+                occ_wlh = b_obj.wlh if (b_obj is not None and hasattr(b_obj, 'wlh')) else None
 
-                # Calcolo larghezza e lunghezza effettive del varco dell'ombra tramite OBB
-                if sp.is_valid and sp.area > 0.01:
-                    mrr = sp.minimum_rotated_rectangle
+                sub_polys = list(sp_25m.geoms) if sp_25m.geom_type == 'MultiPolygon' else [sp_25m]
+                for sp_sub in sub_polys:
+                    if sp_sub.area < 0.1:
+                        continue
+
+                    vis_coords = np.array(sp_sub.exterior.coords)[:-1]
+                    if len(vis_coords) < 3:
+                        continue
+
+                    # Feature semantiche calcolate STRETTAMENTE sulla maschera entro 25m
+                    occ_mask = rasterize_polygon(vis_coords)
+                    tot = np.sum(occ_mask)
+                    road_f = np.sum(occ_mask * drivable_mask) / tot if tot > 0 else 0
+                    side_f = np.sum(occ_mask * walkway_mask) / tot if tot > 0 else 0
+                    cross_f = np.sum(occ_mask * ped_crossing_mask) / tot if tot > 0 else 0
+                    terr_f = max(0.0, 1.0 - (road_f + side_f + cross_f))
+                    area = float(sp_sub.area)
+                    dist = float(np.hypot(sp_sub.centroid.x, sp_sub.centroid.y))
+
+                    # Calcolo prossimità al bordo strada (accosto / sosta entro 2.5m)
+                    min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
+                    roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
+
+                    # Step 1: Estrae la Ground Truth Reale nuScenes a 6 classi entro i 25m
+                    gt_raw_6 = get_occlusion_ground_truth_target(target_masks, vis_coords)
+
+                    # Se positives_only e la zona e vuota, la saltiamo
+                    if gt_mode == "positives_only" and np.sum(gt_raw_6) == 0:
+                        continue
+
+                    # Step 2: Calcolo del target in base alla modalita (applicato al poligono 25m)
+                    if gt_mode in ["real", "positives_only"]:
+                        gt_target = np.array(gt_raw_6, dtype=np.float32)
+                    else:
+                        gt_target, _ = compute_synthetic_ground_truth(
+                            sp=sp_sub,
+                            sp_sample=sp_sub,
+                            road_f=road_f,
+                            side_f=side_f,
+                            cross_f=cross_f,
+                            roadside_f=roadside_f,
+                            area=area,
+                            dist=dist,
+                            gt_raw_6=gt_raw_6,
+                            mode=gt_mode,
+                            occluder_name=occ_name,
+                            occluder_wlh=occ_wlh,
+                            use_occluder_filter=True
+                        )
+
+                    # Ritaglio patch calcolato strettamente sui pixel entro 25m
+                    px_x = np.clip(((vis_coords[:, 0] + 40.0) / 0.4).astype(int), 0, 199)
+                    px_y = np.clip(((40.0 - vis_coords[:, 1]) / 0.4).astype(int), 0, 199)
+                    xmin, xmax = max(0, np.min(px_x) - 2), min(199, np.max(px_x) + 2)
+                    ymin, ymax = max(0, np.min(px_y) - 2), min(199, np.max(px_y) + 2)
+                    if xmax <= xmin or ymax <= ymin:
+                        continue
+
+                    patch = input_tensor[:, ymin:ymax+1, xmin:xmax+1]
+                    patch_res = F.interpolate(patch.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).squeeze(0)
+
+                    # Calcolo larghezza e lunghezza tramite OBB sul poligono 25m
+                    mrr = sp_sub.minimum_rotated_rectangle
                     mrr_coords = np.array(mrr.exterior.coords)[:-1]
                     e1 = np.linalg.norm(mrr_coords[0] - mrr_coords[1])
                     e2 = np.linalg.norm(mrr_coords[1] - mrr_coords[2])
                     obb_w, obb_l = float(min(e1, e2)), float(max(e1, e2))
-                else:
-                    obb_w, obb_l = 0.5, 0.5
 
-                scalars = torch.tensor([area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f], dtype=torch.float32)
-                target = torch.tensor(gt_target, dtype=torch.float32)
+                    scalars = torch.tensor([area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f], dtype=torch.float32)
+                    target = torch.tensor(gt_target, dtype=torch.float32)
+                    occ_mask_t = AttentionPerZoneModel.build_compatibility_mask(occ_name, occ_wlh)
 
-                patches_list.append(patch_res)
-                scalars_list.append(scalars)
-                targets_list.append(target)
+                    patches_list.append(patch_res)
+                    scalars_list.append(scalars)
+                    masks_list.append(occ_mask_t)
+                    targets_list.append(target)
 
         patches = torch.stack(patches_list)
         scalars = torch.stack(scalars_list)
+        masks = torch.stack(masks_list)
         targets = torch.stack(targets_list)
 
         if gt_mode != "positives_only":
-            torch.save({"patches": patches, "scalars": scalars, "targets": targets}, cache_path)
+            torch.save({"patches": patches, "scalars": scalars, "masks": masks, "targets": targets}, cache_path)
             print(f"• Cache salvata in: {cache_path}")
 
     # DataLoader
-    dataset = TensorDataset(patches, scalars, targets)
+    dataset = TensorDataset(patches, scalars, masks, targets)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
     print(f"• Campioni Totali: {len(dataset)} | Batches per Epoca: {len(dataloader)}")
 
@@ -232,7 +300,7 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
     if gt_mode in ["real", "positives_only"]:
         criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05, pos_weights=[1.5, 2.5, 2.5, 2.0, 2.0, 2.5])
     elif gt_mode == "hybrid":
-        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05, pos_weights=[1.2, 2.2, 2.0, 1.8, 1.8, 2.2])
+        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05, pos_weights=[1.2, 2.2, 2.0, 1.8, 1.8, 3.5])
     else:
         criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05)
 
@@ -245,10 +313,10 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
 
     for epoch in range(epochs):
         epoch_loss = 0.0
-        for p_b, s_b, t_b in dataloader:
-            p_b, s_b, t_b = p_b.to(device), s_b.to(device), t_b.to(device)
+        for p_b, s_b, m_b, t_b in dataloader:
+            p_b, s_b, m_b, t_b = p_b.to(device), s_b.to(device), m_b.to(device), t_b.to(device)
             optimizer.zero_grad()
-            logits = model(p_b, s_b)
+            logits = model(p_b, s_b, occluder_mask=m_b)
             loss = criterion(logits, t_b, s_b)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

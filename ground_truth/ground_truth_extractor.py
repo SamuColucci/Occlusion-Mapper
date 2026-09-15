@@ -46,10 +46,11 @@ def rasterize_polygon(poly_pts, grid_dim=GRID_DIM, grid_range=GRID_RANGE, voxel_
     return mask
 
 
-def extract_ground_truth_masks(frame_data):
+def extract_ground_truth_masks(frame_data, exclude_tokens=None):
     """
     Riceve il dizionario frame_data dal dataset adapter nuScenes ed estrae 
     il tensore target a 6 canali (6, 200, 200) contenente i poligoni d'ingombro 3D reali di ciascun ostacolo.
+    Se exclude_tokens è specificato (es. token degli occludori visibili), tali ostacoli vengono esclusi.
     """
     # Inizializza 6 matrici 200x200 vuote a zeri per ciascuna delle 6 classi semantiche
     target_cars = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)         # Canale 0: Auto
@@ -59,8 +60,14 @@ def extract_ground_truth_masks(frame_data):
     target_bicycles = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)     # Canale 4: Bici (Ciclo-pedonale)
     target_structures = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)   # Canale 5: Barriere/Coni
 
+    exclude_set = set(exclude_tokens) if exclude_tokens is not None else None
+
     # Cicla su tutte le scatole 3D degli ostacoli nuScenes presenti nel fotogramma corrente
     for box in frame_data.get("boxes", []):
+        tok = getattr(box, 'token', '') if hasattr(box, 'token') else (box.get('token', '') if isinstance(box, dict) else '')
+        if exclude_set is not None and tok in exclude_set:
+            continue
+
         # Estrazione ed azzeramento del testo per il nome della categoria dell'ostacolo
         if hasattr(box, 'name'):
             cat = box.name.lower()
@@ -109,6 +116,151 @@ def extract_ground_truth_masks(frame_data):
         target_bicycles,
         target_structures
     ], axis=0)
+
+
+def extract_real_occlusion_ground_truth(boxes, occ_polygon, occluder_tokens=None, min_overlap_area=0.05):
+    """
+    Estrae il target di Ground Truth Reale nuScenes per una specifica zona d'ombra (occ_polygon).
+    Esclude rigorosamente tutti gli ostacoli occludenti (occluder_tokens) che generano l'ombra,
+    evitando che l'ostacolo visibile in primo piano venga conteggiato come bersaglio nascosto.
+    
+    Ritorna:
+      gt_6: array np float32 a 6 canali [Auto, Camion/Bus, Pedone, Moto, Bici, Barriere]
+      gt_4: array np float32 a 4 macro-classi [Auto, Camion/Bus, VRU (Pedoni/Bici/Moto), Barriere]
+    """
+    from shapely.geometry import Polygon as ShapelyPoly
+    from shapely.geometry.base import BaseGeometry
+
+    gt_6 = np.zeros(6, dtype=np.float32)
+    gt_4 = np.zeros(4, dtype=np.float32)
+
+    if occ_polygon is None:
+        return gt_6, gt_4
+
+    if isinstance(occ_polygon, BaseGeometry):
+        sp_occ = occ_polygon
+    else:
+        try:
+            pts_np = np.array(occ_polygon)
+            if len(pts_np) < 3:
+                return gt_6, gt_4
+            sp_occ = ShapelyPoly(pts_np[:, :2])
+        except Exception:
+            return gt_6, gt_4
+
+    if not sp_occ.is_valid:
+        sp_occ = sp_occ.buffer(0)
+    if not sp_occ.is_valid or sp_occ.area < 0.01:
+        return gt_6, gt_4
+
+    exclude_set = set(occluder_tokens) if occluder_tokens is not None else set()
+
+    for box in boxes:
+        tok = getattr(box, 'token', '') if hasattr(box, 'token') else (box.get('token', '') if isinstance(box, dict) else '')
+        if tok and tok in exclude_set:
+            continue
+
+        if hasattr(box, 'corners_3d'):
+            c = box.corners_3d[:2, [0, 1, 5, 4]].T
+        elif hasattr(box, 'corners'):
+            c = box.corners()[:2, [0, 1, 5, 4]].T
+        elif hasattr(box, 'bottom_corners'):
+            c = box.bottom_corners()[:2].T
+        elif isinstance(box, dict):
+            c = np.array(box.get('bottom_corners', []))[:2].T if 'bottom_corners' in box else []
+        else:
+            continue
+
+        if len(c) < 3:
+            continue
+
+        try:
+            bp = ShapelyPoly(c)
+            if not bp.is_valid:
+                bp = bp.buffer(0)
+            if not bp.is_valid or bp.area < 0.01:
+                continue
+
+            if sp_occ.intersects(bp):
+                inter_area = sp_occ.intersection(bp).area
+                if inter_area >= min_overlap_area:
+                    name = getattr(box, 'name', '') if hasattr(box, 'name') else box.get('name', '')
+                    cat = name.lower()
+                    if "car" in cat:
+                        gt_6[0] = 1.0
+                        gt_4[0] = 1.0
+                    elif "truck" in cat or "bus" in cat or "trailer" in cat:
+                        gt_6[1] = 1.0
+                        gt_4[1] = 1.0
+                    elif "human" in cat or "pedestrian" in cat:
+                        gt_6[2] = 1.0
+                        gt_4[2] = 1.0
+                    elif "motorcycle" in cat:
+                        gt_6[3] = 1.0
+                        gt_4[2] = 1.0
+                    elif "bicycle" in cat:
+                        gt_6[4] = 1.0
+                        gt_4[2] = 1.0
+                    else:
+                        gt_6[5] = 1.0
+                        gt_4[3] = 1.0
+        except Exception:
+            continue
+
+    return gt_6, gt_4
+
+
+def extract_real_occlusion_boxes(boxes, occlusions, max_range=25.0):
+    """
+    Estrae e separa gli oggetti nuScenes tra:
+      - occluders: ostacoli visibili al LiDAR che generano coni d'ombra
+      - occluded_boxes: ostacoli reali nuScenes che si trovano DENTRO le zone d'ombra (nascosti)
+      - occluder_tokens: set di token degli oggetti occludenti
+    """
+    from shapely.geometry import Polygon as ShapelyPolygon
+    occ_polygons = []
+    occluder_tokens = set()
+    for occ in occlusions:
+        pts = occ.get("polygon_points_m", [])
+        if len(pts) >= 3:
+            try:
+                p = ShapelyPolygon(pts)
+                if p.is_valid and p.area > 0.05:
+                    occ_polygons.append((p, occ))
+                    tok = occ.get("object_token", "")
+                    if tok:
+                        occluder_tokens.add(tok)
+            except Exception:
+                pass
+
+    occluders = []
+    occluded_boxes = []
+    for box in boxes:
+        dist = np.hypot(box.center[0], box.center[1])
+        if dist > max_range:
+            continue
+        try:
+            if hasattr(box, 'corners_3d'):
+                c = box.corners_3d[:2, [0, 1, 5, 4]].T
+            elif hasattr(box, 'corners'):
+                c = box.corners()[:2, [0, 1, 5, 4]].T
+            elif hasattr(box, 'bottom_corners'):
+                c = box.bottom_corners()[:2].T
+            else:
+                continue
+            box_poly = ShapelyPolygon(c)
+            if not box_poly.is_valid:
+                box_poly = box_poly.buffer(0)
+
+            tok = getattr(box, 'token', '') if hasattr(box, 'token') else (box.get('token', '') if isinstance(box, dict) else '')
+            if tok in occluder_tokens:
+                occluders.append(box)
+            elif any(op.intersects(box_poly) for op, _ in occ_polygons):
+                occluded_boxes.append(box)
+        except Exception:
+            pass
+
+    return occluders, occluded_boxes, occluder_tokens
 
 
 def get_occlusion_ground_truth_target(target_tensor, poly_pts):

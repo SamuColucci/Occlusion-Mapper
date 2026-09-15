@@ -20,15 +20,26 @@ Attualmente l'architettura ufficiale impiega:
   - La Coordinate Attention fattorizza l'attenzione lungo l'asse X e Y, preservando la precisa localizzazione spaziale degli ostacoli senza degradare con il global pooling.
 - **Overhead**: Praticamente nullo (< 2 ms per frame), mantiene il processing pienamente real-time (> 30 FPS).
 
-### B. Modellazione Temporale Sequenziale (ConvLSTM / GRU / BEV-Former Temporal Fusion)
-- **Idea**: Attualmente l'inferenza è **single-frame** (analizza il frame $t$ staticamente). Nel mondo reale, le occlusioni sono fenomeni dinamici.
-- **Come Funzionerebbe**:
-  - Un modulo **ConvLSTM** o **Gated Recurrent Unit (ConvGRU)** riceve la sequenza di mappe BEV $[t-4, t-3, t-2, t-1, t]$.
-  - Se un pedone o un ciclista era visibile al frame $t-2$ e scompare dietro un camion al frame $t$, la memoria ricorrente dell'architettura mantiene viva l'informazione di persistenza (*Object Permanence*).
-  - La probabilità di rischio nella zona occlusa sale quasi al 100% perché la rete "si ricorda" che un agente è appena entrato nell'ombra.
-- **Costo**: Richiede l'estensione del dataset loader a sequenze temporali contigue (nuScenes sample annotations + sweeps intermedi a 20Hz).
+### B. Memoria Storica Spazio-Temporale come Canale di Input Dedicato (`C_mem: Memory BEV`)
+- **Idea & Principio Metodologico**:
+  - Evitare filtri euristici o post-processing esterni a valle dell'inferenza: alterare artificialmente le probabilità della rete a valle comprometterebbe la trasparenza scientifica della valutazione.
+  - La memoria storica deve essere invece **un canale di ingresso nativo della rete neurale** (un 12° canale tensoriale di input, oppure l'11° canale se integrato nella mappa LiDAR/dinamica), consentendo all'architettura neurale di apprendere in modo autonomo end-to-end come combinare percezione istantanea e memoria storica.
+- **Come Funziona l'Estrazione del Canale di Memoria**:
+  1. **Compensazione del Movimento dell'Ego-Vehicle (*Ego-Motion Compensation*)**:
+     Utilizzando la matrice di trasformazione ricavata da `ego_pose` (traslazione e quaternione), le osservazioni degli ostacoli visibili ai frame $t-1, t-2$ vengono portate nel sistema di coordinate del mondo ($X_{world}, Y_{world}$) e successivamente riproiettate nel sistema di coordinate BEV del frame corrente $t$:
+     $$P_{ego}^t = (R_{ego}^t)^{-1} \cdot (P_{world} - T_{ego}^t)$$
+  2. **Persistenza per Ostacoli Statici (Barriere, New Jersey, Cantieri)**:
+     Gli oggetti fissi visti in precedenza restano ancorati alle loro coordinate globali. Quando il veicolo avanza e una barriera precedentemente visibile finisce all'interno di una zona d'ombra attuale, il canale di memoria la contrassegna esplicitamente, permettendo alla rete di riconoscerla con certezza geometrica.
+  3. **Ingresso in Zona Cieca per Ostacoli Dinamici (*Shadow Ingress*)**:
+     Per pedoni e veicoli in movimento con vettore velocità $\vec{v}$, la loro posizione stimata $P_{est}^t = P^{t-1} + \vec{v}\cdot \Delta t$ viene rasterizzata sul canale di memoria con un fattore di decadimento temporale (ad es. $\tau = 2\div 3$ secondi), fornendo alla rete un forte segnale induttivo nel caso in cui l'agente scompaia dietro un occlusore.
+- **Vantaggi Scientifici per la Tesi**:
+  - **Apprendimento End-to-End via Attention (SE-Block)**: Il blocco Squeeze-and-Excitation della rete impara dinamicamente quanto peso attribuire al canale di memoria rispetto ai canali di osservazione istantanea (LiDAR e HD-Map).
+  - **Valutazione Integra e Inattaccabile**: Lo script di benchmark (`evaluate_final_official.py`) valuta puramente le predizioni della rete neurale addestrata, senza alcuna modifica manuale post-hoc dei risultati.
+- **Costo di Realizzazione**: Richiede la generazione di un dataset sequenziale temporale ($t-1 \to t$) in fase di estrazione dati e il riaddestramento del modello a 12 canali.
 
-### C. Graph Neural Networks (GNN / Scene Graphs Topologici)
+### C. Modellazione Ricorrente Sequenziale (ConvLSTM / GRU / BEV-Former Temporal Fusion)
+- **Idea**: Oltre al canale di memoria esplicito, un modulo ricorrente interno **ConvLSTM** o **Gated Recurrent Unit (ConvGRU)** riceve la sequenza temporale di feature maps BEV per mantenere uno stato latente continuo.
+- **Costo**: Richiede sequenze temporali contigue dense (nuScenes sweeps intermedi a 20Hz) e un incremento significativo della memoria GPU durante il backpropagation through time (BPTT).
 - **Idea**: Rappresentare la scena non solo come raster BEV, ma come un **Grafo di Relazioni Topologiche**:
   - **Nodi**: Ego-Vehicle, Veicoli occlusori (camion, bus, auto parcheggiate), Zone d'ombra geometriche, Aree stradali (marciapiede, attraversamento pedonale, corsia).
   - **Archi**: Relazioni spaziali e causali (*"il camion X occlude la zona Y"*, *"la zona Y interseca l'attraversamento pedonale Z"*).
@@ -71,8 +82,9 @@ Tuttavia, all'interno della famiglia ASL, ci sono margini di ulteriore perfezion
 | :--- | :---: | :---: | :---: | :---: |
 | **Spatial Attention (CBAM)** | Bassa | Medio-Alto (+2-3% F1 sui bordi) | Eccellente (<2ms) | ⭐⭐⭐ Consigliato per Tesi |
 | **Distance-Weighted ASL** | Minima | Medio (+sicurezza a corto raggio) | Immediato (0ms runtime) | ⭐⭐⭐ Consigliato per Tesi |
-| **ConvLSTM Temporale** | Media | Altissimo (persistenza oggetti) | Buono (~15-20ms) | ⭐⭐ Sezione "Sviluppi Futuri" |
-| **Radar Doppler Channels** | Media | Alto (robustezza dinamica) | Ottimo (<5ms) | ⭐⭐ Sezione "Sviluppi Futuri" |
+| **Canale Memoria BEV (End-to-End)** | Media | Altissimo (persistenza barriere e VRU) | Eccellente (<3ms) | ⭐⭐ Sezione "Sviluppi Futuri" |
+| **ConvLSTM Temporale** | Alta | Altissimo (dinamiche complesse) | Buono (~15-20ms) | ⭐ Sezione "Sviluppi Futuri" |
+| **Radar Doppler Channels** | Media | Alto (robustezza dinamica) | Ottimo (<5ms) | ⭐ Sezione "Sviluppi Futuri" |
 | **Scene Graph GNN** | Alta | Teorico/Accademico | Medio (~30-50ms) | ⭐ Sezione "Sviluppi Futuri" |
 
 ---

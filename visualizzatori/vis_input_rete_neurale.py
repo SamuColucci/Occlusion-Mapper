@@ -257,6 +257,12 @@ class NeuralInputsVisualizer:
     def extract_11_channels(self):
         """Costruisce esattamente l'array tensoriale a 11 canali (11, 200, 200) del modello."""
         # 1. Canale 0: LiDAR Density BEV
+        # Maschera circolare metrica a 25m per tagliare rigorosamente TUTTI gli 11 canali di input
+        r_grid = np.arange(GRID_DIM)
+        gy, gx = np.meshgrid(r_grid, r_grid)
+        mask_25m = (np.sqrt((gx - 99.5)**2 + (gy - 99.5)**2) * VOXEL_SIZE <= self.max_range).astype(np.float32)
+
+        # 1. Canale 0: LiDAR Density BEV (entro 25m)
         self.lidar_bev = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
         points = self.frame_data.get("points", np.zeros((0, 3)))
         if len(points) > 0:
@@ -265,11 +271,14 @@ class NeuralInputsVisualizer:
                 py = int((GRID_RANGE - py_m) / VOXEL_SIZE)
                 if 0 <= px < GRID_DIM and 0 <= py < GRID_DIM:
                     self.lidar_bev[py, px] = 1.0
+        self.lidar_bev = self.lidar_bev * mask_25m
 
-        # 2. Canale 1: Ombre Raycasting (Maschera cumulativa)
+        # 2. Canale 1: Ombre Raycasting (Maschera cumulativa entro 25m)
         self.occlusion_mask = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
         token = self.frame_data.get("sample_token", "")
         json_path = os.path.join(ROOT_DIR, "extracted_occlusions", f"{token}.json")
+        circle_25m = Point(0, 0).buffer(self.max_range)
+
         if os.path.exists(json_path):
             with open(json_path, "r") as f:
                 raw_data = json.load(f)
@@ -277,32 +286,45 @@ class NeuralInputsVisualizer:
                 for occ in occs:
                     pts = occ.get("polygon_points_m", [])
                     if len(pts) >= 3:
-                        pts_arr = np.array(pts)
-                        pts_xy = np.column_stack([pts_arr[:, 1], pts_arr[:, 0]])
-                        mask = rasterize_polygon(pts_xy)
-                        self.occlusion_mask = np.maximum(self.occlusion_mask, mask)
+                        sp = ShapelyPolygon(pts)
+                        if not sp.is_valid:
+                            sp = sp.buffer(0)
+                        sp_25 = sp.intersection(circle_25m)
+                        if not sp_25.is_empty and sp_25.area >= 0.1:
+                            sub_polys = list(sp_25.geoms) if sp_25.geom_type == 'MultiPolygon' else [sp_25]
+                            for p_sub in sub_polys:
+                                coords = np.array(p_sub.exterior.coords)[:-1]
+                                mask = rasterize_polygon(coords)
+                                self.occlusion_mask = np.maximum(self.occlusion_mask, mask)
         else:
             rc = RayCaster(self.frame_data, verbose=False)
             res = rc.calculate_occlusions(self.frame_data)
             for poly in res.get("occlusions", []):
                 pts = poly.get("polygon_points", [])
                 if len(pts) >= 3:
-                    pts_arr = np.array(pts)
-                    pts_xy = np.column_stack([pts_arr[:, 1], pts_arr[:, 0]])
-                    mask = rasterize_polygon(pts_xy)
-                    self.occlusion_mask = np.maximum(self.occlusion_mask, mask)
+                    sp = ShapelyPolygon(pts)
+                    if not sp.is_valid:
+                        sp = sp.buffer(0)
+                    sp_25 = sp.intersection(circle_25m)
+                    if not sp_25.is_empty and sp_25.area >= 0.1:
+                        sub_polys = list(sp_25.geoms) if sp_25.geom_type == 'MultiPolygon' else [sp_25]
+                        for p_sub in sub_polys:
+                            coords = np.array(p_sub.exterior.coords)[:-1]
+                            mask = rasterize_polygon(coords)
+                            self.occlusion_mask = np.maximum(self.occlusion_mask, mask)
+        self.occlusion_mask = self.occlusion_mask * mask_25m
 
-        # 3. Canali 2, 3, 4: HD Map (Drivable, Walkway, Ped Crossing)
+        # 3. Canali 2, 3, 4: HD Map (Drivable, Walkway, Ped Crossing) entro 25m
         semantic_map = self.frame_data.get('semantic_map', {})
         self.drivable_mask = np.maximum(
             semantic_map.get('drivable_area', np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)),
             semantic_map.get('carpark_area', np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32))
-        )
-        self.walkway_mask = semantic_map.get('walkway', np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32))
-        self.ped_crossing_mask = semantic_map.get('ped_crossing', np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32))
+        ) * mask_25m
+        self.walkway_mask = semantic_map.get('walkway', np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)) * mask_25m
+        self.ped_crossing_mask = semantic_map.get('ped_crossing', np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)) * mask_25m
 
-        # 4. Canali 5-10: Target masks (Auto, Camion, Pedoni, Moto, Bici, Barriere)
-        target_masks = extract_ground_truth_masks(self.frame_data)
+        # 4. Canali 5-10: Target masks (Auto, Camion, Pedoni, Moto, Bici, Barriere) entro 25m
+        target_masks = extract_ground_truth_masks(self.frame_data) * mask_25m
 
         self.channels_11 = [
             self.lidar_bev,
@@ -315,7 +337,7 @@ class NeuralInputsVisualizer:
         self.input_tensor = torch.tensor(np.stack(self.channels_11, axis=0), dtype=torch.float32)
 
     def extract_occlusion_zones(self):
-        """Estrae le zone d'ombra entro 25 metri e calcola i 9 descrittori scalari per ciascuna."""
+        """Estrae le zone d'ombra strettamente entro 25 metri e calcola i 9 descrittori scalari per ciascuna."""
         import cv2
         dt_road_map = cv2.distanceTransform((1 - self.drivable_mask).astype(np.uint8), cv2.DIST_L2, 3) * VOXEL_SIZE
 
@@ -329,13 +351,9 @@ class NeuralInputsVisualizer:
         else:
             raw_occs = []
 
-        circle_25m = Point(0, 0).buffer(self.max_range - 0.4)
+        circle_25m = Point(0, 0).buffer(self.max_range)
 
         for i, occ in enumerate(raw_occs):
-            dist = float(occ.get("distance_m", 0.0))
-            if dist > self.max_range:
-                continue
-
             pts = occ.get("polygon_points_m", [])
             pts_np = np.array(pts)
             if len(pts_np) < 3:
@@ -344,62 +362,72 @@ class NeuralInputsVisualizer:
 
             sp = ShapelyPolygon(poly_xy)
             if not sp.is_valid or sp.area <= 0.01:
+                sp = sp.buffer(0)
+            if not sp.is_valid or sp.area <= 0.01:
                 continue
 
+            # Taglio geometrico rigoroso alla circonferenza dei 25m
             poly_vis = sp.intersection(circle_25m)
-            if poly_vis.is_empty or poly_vis.area < 0.02:
+            if poly_vis.is_empty or poly_vis.area < 0.1:
                 continue
 
-            occ_mask = rasterize_polygon(pts)
-            tot = np.sum(occ_mask)
-            road_f = float(np.sum(occ_mask * self.drivable_mask) / tot if tot > 0 else 0.0)
-            side_f = float(np.sum(occ_mask * self.walkway_mask) / tot if tot > 0 else 0.0)
-            cross_f = float(np.sum(occ_mask * self.ped_crossing_mask) / tot if tot > 0 else 0.0)
-            terr_f = max(0.0, 1.0 - (road_f + side_f + cross_f))
-            area = float(occ.get("area_sqm", 0.0))
+            sub_geoms = list(poly_vis.geoms) if poly_vis.geom_type == 'MultiPolygon' else [poly_vis]
+            for poly_main in sub_geoms:
+                if poly_main.area < 0.1:
+                    continue
 
-            min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
-            roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
+                vis_coords = np.array(poly_main.exterior.coords)[:-1]
+                if len(vis_coords) < 3:
+                    continue
 
-            if sp.is_valid and sp.area > 0.01:
-                mrr = sp.minimum_rotated_rectangle
+                occ_mask = rasterize_polygon(vis_coords)
+                tot = np.sum(occ_mask)
+                road_f = float(np.sum(occ_mask * self.drivable_mask) / tot if tot > 0 else 0.0)
+                side_f = float(np.sum(occ_mask * self.walkway_mask) / tot if tot > 0 else 0.0)
+                cross_f = float(np.sum(occ_mask * self.ped_crossing_mask) / tot if tot > 0 else 0.0)
+                terr_f = max(0.0, 1.0 - (road_f + side_f + cross_f))
+                area = float(poly_main.area)
+                dist = float(np.hypot(poly_main.centroid.x, poly_main.centroid.y))
+
+                min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
+                roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
+
+                mrr = poly_main.minimum_rotated_rectangle
                 mrr_coords = np.array(mrr.exterior.coords)[:-1]
                 e1 = np.linalg.norm(mrr_coords[0] - mrr_coords[1])
                 e2 = np.linalg.norm(mrr_coords[1] - mrr_coords[2])
                 obb_w, obb_l = float(min(e1, e2)), float(max(e1, e2))
-            else:
-                obb_w, obb_l = 0.5, 0.5
 
-            scalars = [area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]
+                scalars = [area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]
 
-            # Verifiche vincolo neuro-simbolico fisico
-            auto_allowed = (obb_w >= 1.7 and road_f >= 0.15)
-            truck_allowed = (obb_w >= 2.3 and road_f >= 0.15)
-            vru_allowed = True
+                # Verifiche vincolo neuro-simbolico fisico
+                auto_allowed = (obb_w >= 1.55 and (road_f >= 0.08 or roadside_f >= 0.20) and area >= 5.0)
+                truck_allowed = (obb_w >= 2.15 and (road_f >= 0.12 or roadside_f >= 0.25) and area >= 14.0)
+                vru_allowed = True
 
-            # Centroide per etichetta
-            c_pt = sp.centroid
-            cx, cy = float(c_pt.x), float(c_pt.y)
+                # Punto rappresentativo per etichetta entro 25m
+                c_pt = poly_main.representative_point()
+                cx, cy = float(c_pt.x), float(c_pt.y)
 
-            self.occlusion_zones.append({
-                "idx": len(self.occlusion_zones),
-                "poly_xy": poly_xy,
-                "shapely": sp,
-                "center": (cx, cy),
-                "scalars": scalars,
-                "area": area,
-                "dist": dist,
-                "obb_w": obb_w,
-                "obb_l": obb_l,
-                "road_f": road_f,
-                "side_f": side_f,
-                "cross_f": cross_f,
-                "roadside_f": roadside_f,
-                "terr_f": terr_f,
-                "auto_allowed": auto_allowed,
-                "truck_allowed": truck_allowed,
-                "vru_allowed": vru_allowed
-            })
+                self.occlusion_zones.append({
+                    "idx": len(self.occlusion_zones),
+                    "poly_xy": vis_coords,
+                    "shapely": poly_main,
+                    "center": (cx, cy),
+                    "scalars": scalars,
+                    "area": area,
+                    "dist": dist,
+                    "obb_w": obb_w,
+                    "obb_l": obb_l,
+                    "road_f": road_f,
+                    "side_f": side_f,
+                    "cross_f": cross_f,
+                    "roadside_f": roadside_f,
+                    "terr_f": terr_f,
+                    "auto_allowed": auto_allowed,
+                    "truck_allowed": truck_allowed,
+                    "vru_allowed": vru_allowed
+                })
 
     def compute_channel_attention(self):
         """Calcola i pesi Channel Attention Squeeze-and-Excitation su scala globale."""
@@ -758,6 +786,11 @@ class NeuralInputsVisualizer:
             # Visualizza la mappa del canale (rot90 x3 per allineare l'orientamento alle mappe semantiche nuScenes)
             v_max = max(1.0, float(np.max(ch_data)))
             ax_c.imshow(np.rot90(ch_data, 3), extent=extent, cmap=meta["cmap"], vmin=0, vmax=v_max, origin='lower')
+
+            # Cerchio tratteggiato limite operativo a 25m
+            c_circle = '#64748B' if i == 0 else '#94A3B8'
+            circ_25 = Circle((0, 0), self.max_range, color=c_circle, fill=False, linestyle='--', linewidth=0.75, zorder=6)
+            ax_c.add_patch(circ_25)
 
             # Indicatore peso attention per canale
             w_se = self.se_weights[i] if i < len(self.se_weights) else 0.5

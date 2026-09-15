@@ -34,7 +34,8 @@ if ROOT_DIR not in sys.path:
 
 from dataset_adapter.factory_dataset import create_adapter
 from raycaster.ray_caster import RayCaster
-from ground_truth.ground_truth_extractor_synthetic import compute_synthetic_ground_truth
+from ground_truth.ground_truth_extractor_synthetic import compute_synthetic_ground_truth, get_occluder_filter_explanation
+from ground_truth.ground_truth_extractor import rasterize_polygon, extract_real_occlusion_boxes
 
 SYNC_FILE = os.path.join(ROOT_DIR, "scratch", "sync_frame.txt")
 
@@ -79,14 +80,20 @@ class GroundTruthOcclusionVisualizer:
         self.total_frames = self.adapter.get_num_samples()
         self.current_idx = 0
         init_m = initial_mode.upper()
-        if init_m in ["HYBRID", "IBRIDO", "SINTETICA_HYBRID", "NEURO_SIMB", "NEURO", "SINTETICA", "SINTETICA_GEOM", "SINTETICA_SEM"]:
+        if init_m in ["HYBRID", "IBRIDO", "SINTETICA_HYBRID", "NEURO_SIMB", "NEURO", "SINTETICA"]:
             self.gt_mode = "NEURO_SIMB"
+        elif init_m in ["GEOM", "GEOMETRIC", "GEOMETRICA", "SINTETICA_GEOM"]:
+            self.gt_mode = "GEOMETRICA"
+        elif init_m in ["SEM", "SEMANTIC", "SEMANTICA", "SINTETICA_SEM"]:
+            self.gt_mode = "SEMANTICA"
         elif init_m in ["REALE", "REAL"]:
             self.gt_mode = "REALE"
         elif init_m in ["REALE_POSITIVES", "POSITIVES", "POS_ONLY"]:
             self.gt_mode = "REALE_POSITIVES"
         else:
             self.gt_mode = "NEURO_SIMB"
+
+        self.use_occluder_filter = True
 
         # Setup tipografia accademica
         plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica']
@@ -227,48 +234,26 @@ class GroundTruthOcclusionVisualizer:
         In modalità SINTETICA: restituisce ([], syn_boxes)
           - syn_boxes: ostacoli sintetici verosimili generati dentro le ombre
         """
-        # Costruisce i poligoni Shapely per tutte le occlusioni valide,
-        # conservando il token dell'oggetto che genera l'ombra
-        occ_polygons = []        # list of (ShapelyPoly, occ_dict)
-        occluder_tokens = set()  # token degli oggetti che generano ombre
-        for occ in self.occlusions:
-            pts = occ.get("polygon_points_m", [])
-            if len(pts) >= 3:
-                try:
-                    p = ShapelyPolygon(pts)
-                    if p.is_valid and p.area > 0.05:
-                        occ_polygons.append((p, occ))
-                        tok = occ.get("object_token", "")
-                        if tok:
-                            occluder_tokens.add(tok)
-                except Exception:
-                    pass
-
         if self.gt_mode in ["REALE", "REALE_POSITIVES"]:
             all_boxes = self.frame_data.get('boxes', [])
-            occluders = []
-            occluded_boxes = []
-            for box in all_boxes:
-                dist = np.hypot(box.center[0], box.center[1])
-                if dist > self.max_range:
-                    continue
-                try:
-                    corners_bev = box.corners_3d[:2, [0, 1, 5, 4]].T
-                    box_poly = ShapelyPolygon(corners_bev)
-
-                    # Questo box GENERA un'occlusione?
-                    if box.token in occluder_tokens:
-                        occluders.append(box)
-                    # Questo box è NASCOSTO dentro un'ombra?
-                    elif any(op.intersects(box_poly) for op, _ in occ_polygons):
-                        occluded_boxes.append(box)
-                except Exception:
-                    pass
+            occluders, occluded_boxes, _ = extract_real_occlusion_boxes(
+                all_boxes, self.occlusions, max_range=self.max_range
+            )
             return occluders, occluded_boxes
 
         else:
-            # Modalità SINTETICA NEURO-SIMBOLICA (Spazio 3D + HD-Map)
+            # Modalità SINTETICA NEURO-SIMBOLICA (Spazio 3D + HD-Map entro 25m)
             syn_boxes = []
+
+            occ_polygons = []
+            for occ in self.occlusions:
+                pts = occ.get("polygon_points_m", [])
+                if len(pts) >= 3:
+                    sp = ShapelyPolygon(pts)
+                    if not sp.is_valid:
+                        sp = sp.buffer(0)
+                    if sp.is_valid and sp.area > 0.05:
+                        occ_polygons.append((sp, occ))
 
             circle_25m = ShapelyPoint(0, 0).buffer(self.max_range)
             all_generated_points = []
@@ -279,34 +264,89 @@ class GroundTruthOcclusionVisualizer:
             else:
                 gt_mode_param = "hybrid"
 
+            # Precalcolo per la distanza dalla carreggiata (accosto bordo strada)
+            import cv2
+            smap = self.frame_data.get('semantic_map', {})
+            drivable_m = smap.get('drivable_area', np.zeros((200, 200)))
+            walkway_m = smap.get('walkway', np.zeros((200, 200)))
+            crossing_m = smap.get('ped_crossing', np.zeros((200, 200)))
+            dt_road = cv2.distanceTransform((1 - drivable_m).astype(np.uint8), cv2.DIST_L2, 3) * 0.4
+
+            # Mappa rapida per estrarre le dimensioni 3D dell'occludore se noto
+            boxes_by_token = {b.token: b for b in self.frame_data.get('boxes', [])}
+            for sb in getattr(self, 'static_boxes', []):
+                boxes_by_token[sb.token] = sb
+
             for idx, (poly, occ) in enumerate(occ_polygons):
                 poly_vis = poly.intersection(circle_25m)
-                if poly_vis.is_empty or poly_vis.area < 3.5:
+                if poly_vis.is_empty or poly_vis.area < 0.2:
                     continue
 
-                road_f = float(occ.get('road_fraction', 0.0))
-                side_f = float(occ.get('sidewalk_fraction', 0.0))
-                cross_f = float(occ.get('crosswalk_fraction', 0.0))
+                occ_name = occ.get('object_name', None)
+                occ_tok = occ.get('object_token', None)
+                b_obj = boxes_by_token.get(occ_tok, None)
+                if b_obj is not None:
+                    if hasattr(b_obj, 'wlh'):
+                        occ_wlh = b_obj.wlh
+                    elif hasattr(b_obj, 'max_x'):
+                        occ_wlh = [b_obj.max_x - b_obj.min_x, b_obj.max_y - b_obj.min_y, b_obj.max_z - b_obj.min_z]
+                    else:
+                        occ_wlh = None
+                    if not occ_name and hasattr(b_obj, 'name'):
+                        occ_name = b_obj.name
+                else:
+                    occ_wlh = None
 
-                # Calcolo centralizzato della Ground Truth sintetica neurosimbolica
-                _, placed_objects = compute_synthetic_ground_truth(
-                    sp=poly,
-                    sp_sample=poly_vis,
-                    road_f=road_f,
-                    side_f=side_f,
-                    cross_f=cross_f,
-                    area=float(poly.area),
-                    dist=float(occ.get('distance_m', 0.0)),
-                    existing_points=all_generated_points,
-                    min_dist=3.0,
-                    mode=gt_mode_param
-                )
+                # ponytail: se l'intersezione genera un MultiPolygon, consideriamo le componenti significative
+                sub_polys = list(poly_vis.geoms) if poly_vis.geom_type == 'MultiPolygon' else [poly_vis]
 
-                for (class_idx, obj_name, pt, yaw, wlh) in placed_objects:
-                    cx, cy = float(pt.x), float(pt.y)
-                    all_generated_points.append(pt)
-                    sb = SyntheticBox(obj_name, [cx, cy, 0.5], wlh, yaw=yaw, token=f"syn_{idx}_{int(abs(cx*10))}")
-                    syn_boxes.append(sb)
+                for s_idx, sp_sub in enumerate(sub_polys):
+                    if sp_sub.area < 0.2:
+                        continue
+
+                    coords_sub = np.array(sp_sub.exterior.coords)[:-1]
+                    occ_mask = rasterize_polygon(coords_sub)
+                    tot_px = np.sum(occ_mask)
+
+                    if tot_px > 0:
+                        road_f = float(np.sum(occ_mask * drivable_m) / tot_px)
+                        side_f = float(np.sum(occ_mask * walkway_m) / tot_px)
+                        cross_f = float(np.sum(occ_mask * crossing_m) / tot_px)
+                        min_d_r = float(np.min(dt_road[occ_mask > 0]))
+                        roadside_f = max(0.0, 1.0 - (min_d_r / 2.5))
+                    else:
+                        road_f = float(occ.get('road_fraction', 0.0))
+                        side_f = float(occ.get('sidewalk_fraction', 0.0))
+                        cross_f = float(occ.get('crosswalk_fraction', 0.0))
+                        roadside_f = float(occ.get('roadside_fraction', 0.0))
+
+                    area_sub = float(sp_sub.area)
+                    dist_sub = float(np.hypot(sp_sub.centroid.x, sp_sub.centroid.y))
+
+                    # Calcolo centralizzato della Ground Truth sintetica neurosimbolica strettamente entro 25m
+                    _, placed_objects = compute_synthetic_ground_truth(
+                        sp=sp_sub,
+                        sp_sample=sp_sub,
+                        road_f=road_f,
+                        side_f=side_f,
+                        cross_f=cross_f,
+                        roadside_f=roadside_f,
+                        area=area_sub,
+                        dist=dist_sub,
+                        existing_points=all_generated_points,
+                        min_dist=3.0,
+                        mode=gt_mode_param,
+                        occluder_name=occ_name,
+                        occluder_wlh=occ_wlh,
+                        use_occluder_filter=getattr(self, 'use_occluder_filter', True)
+                    )
+
+                    for (class_idx, obj_name, pt, yaw, wlh) in placed_objects:
+                        cx, cy = float(pt.x), float(pt.y)
+                        if np.hypot(cx, cy) <= self.max_range:
+                            all_generated_points.append(pt)
+                            sb = SyntheticBox(obj_name, [cx, cy, 0.5], wlh, yaw=yaw, token=f"syn_{idx}_{s_idx}_{int(abs(cx*10))}")
+                            syn_boxes.append(sb)
 
             return [], syn_boxes
 
@@ -455,21 +495,25 @@ class GroundTruthOcclusionVisualizer:
         # =====================================================================
         occluders, occluded_boxes = self.get_ground_truth_occluded_boxes()
 
-        # Poligoni reali dei Coni d'Ombra (Raycasting Occlusions)
+        # Poligoni reali dei Coni d'Ombra (Raycasting Occlusions strettamente entro 25m)
+        circle_25m = ShapelyPoint(0, 0).buffer(self.max_range)
         for occ in self.occlusions:
             poly_pts = occ.get("polygon_points_m", [])
             if len(poly_pts) < 3:
                 continue
             poly_arr = np.array(poly_pts)
-            if not np.any(np.hypot(poly_arr[:, 0], poly_arr[:, 1]) <= self.max_range):
+            p = ShapelyPolygon(poly_arr)
+            if not p.is_valid:
+                p = p.buffer(0)
+            p_vis = p.intersection(circle_25m)
+            if p_vis.is_empty or p_vis.area < 0.05:
                 continue
             
-            p = ShapelyPolygon(poly_arr)
             has_occluded = False
             boxes_in_zone = []
             for box in occluded_boxes:
                 corners_bev = box.corners_3d[:2, [0, 1, 5, 4]].T
-                if p.intersects(ShapelyPolygon(corners_bev)):
+                if p_vis.intersects(ShapelyPolygon(corners_bev)):
                     has_occluded = True
                     boxes_in_zone.append(box)
 
@@ -481,22 +525,41 @@ class GroundTruthOcclusionVisualizer:
             edge_c = '#EA580C' if has_occluded else c_cone_edge
             lw = 1.6 if has_occluded else 0.9
 
-            patch = MplPolygon(poly_arr, closed=True,
-                               facecolor=face_c, edgecolor=edge_c,
-                               linewidth=lw, alpha=0.50, zorder=5)
-            ax_map.add_patch(patch)
+            occ_tok = occ.get("object_token", "")
+            occ_wlh = None
+            if occ_tok:
+                for b in self.frame_data.get('boxes', []):
+                    if b.token == occ_tok:
+                        occ_wlh = b.wlh
+                        break
+                if occ_wlh is None:
+                    for sb in getattr(self, 'static_boxes', []):
+                        if sb.token == occ_tok:
+                            occ_wlh = [sb.max_x - sb.min_x, sb.max_y - sb.min_y, sb.max_z - sb.min_z]
+                            break
 
-            self.drawn_occlusions.append({
-                'patch': patch,
-                'data': occ,
-                'polygon': poly_arr,
-                'default_face': face_c,
-                'default_edge': edge_c,
-                'default_alpha': 0.50,
-                'default_z': 5,
-                'has_occluded': has_occluded,
-                'occluded_boxes': boxes_in_zone
-            })
+            sub_geoms = list(p_vis.geoms) if p_vis.geom_type == 'MultiPolygon' else [p_vis]
+            for geom in sub_geoms:
+                if geom.area < 0.05:
+                    continue
+                c_pts = np.array(geom.exterior.coords)
+                patch = MplPolygon(c_pts, closed=True,
+                                   facecolor=face_c, edgecolor=edge_c,
+                                   linewidth=lw, alpha=0.50, zorder=5)
+                ax_map.add_patch(patch)
+
+                self.drawn_occlusions.append({
+                    'patch': patch,
+                    'data': occ,
+                    'polygon': c_pts,
+                    'default_face': face_c,
+                    'default_edge': edge_c,
+                    'default_alpha': 0.50,
+                    'default_z': 5,
+                    'has_occluded': has_occluded,
+                    'occluded_boxes': boxes_in_zone,
+                    'occ_wlh': occ_wlh
+                })
 
         # Strutture statiche man-made (muri/edifici)
         for sb in getattr(self, 'static_boxes', []):
@@ -669,11 +732,21 @@ class GroundTruthOcclusionVisualizer:
             badge_edge = '#D97706'
             badge_text_col = '#B45309'
             badge_title = "GT REALE (Solo Zone con Oggetto)"
+        elif self.gt_mode == 'GEOMETRICA':
+            badge_bg = '#E0F2FE'
+            badge_edge = '#0284C7'
+            badge_text_col = '#0369A1'
+            badge_title = "★ GT GEOMETRICA (Fitting 3D)"
+        elif self.gt_mode == 'SEMANTICA':
+            badge_bg = '#FFF1F2'
+            badge_edge = '#E11D48'
+            badge_text_col = '#BE123C'
+            badge_title = "★ GT SEMANTICA (Regole Naïve HD-Map)"
         else:  # NEURO_SIMB
             badge_bg = '#EDE9FE'
             badge_edge = '#7C3AED'
             badge_text_col = '#6D28D9'
-            badge_title = "★ GT NEURO-SIMBOLICA (Spazio 3D + HD-Map)"
+            badge_title = "★ GT IBRIDA (Spazio 3D + HD-Map)"
 
         ax_telemetry.add_patch(FancyBboxPatch((0.35, 0.60), 0.59, 0.18, boxstyle="round,pad=0.02",
                                               transform=ax_telemetry.transAxes,
@@ -706,16 +779,42 @@ class GroundTruthOcclusionVisualizer:
             ]
             meta_colors  = ['#334155', '#334155', '#7C3AED', '#D97706', '#B45309']
             meta_weights = ['normal', 'normal', 'bold', 'bold', 'bold']
-        else:  # NEURO_SIMB
+        elif self.gt_mode == "GEOMETRICA":
+            flt_txt = "ATTIVO" if getattr(self, 'use_occluder_filter', True) else "DISATTIVATO"
+            flt_col = '#15803D' if getattr(self, 'use_occluder_filter', True) else '#EA580C'
             meta_lines = [
                 f"Dataset: nuScenes ({self.scene_name})",
                 f"Campione: {self.current_idx + 1} / {self.total_frames}",
                 f"Ostacoli Sintetici Previsti: {total_occluded}",
-                f"Strategia: Neuro-Simbolica (Spazio 3D + Mappa HD)",
-                f"Mostra: Coni d'ombra con ostacoli verosimili plausibili"
+                f"Filtro Occludore: {flt_txt} (Tasto 'O')",
+                f"Strategia: Fitting Spaziale 3D (Bounding Box)"
             ]
-            meta_colors  = ['#334155', '#334155', '#0F172A', '#7C3AED', '#6D28D9']
-            meta_weights = ['normal', 'normal', 'bold', 'normal', 'bold']
+            meta_colors  = ['#334155', '#334155', '#0F172A', flt_col, '#0284C7']
+            meta_weights = ['normal', 'normal', 'bold', 'bold', 'bold']
+        elif self.gt_mode == "SEMANTICA":
+            flt_txt = "ATTIVO" if getattr(self, 'use_occluder_filter', True) else "DISATTIVATO"
+            flt_col = '#15803D' if getattr(self, 'use_occluder_filter', True) else '#EA580C'
+            meta_lines = [
+                f"Dataset: nuScenes ({self.scene_name})",
+                f"Campione: {self.current_idx + 1} / {self.total_frames}",
+                f"Ostacoli Sintetici Previsti: {total_occluded}",
+                f"Filtro Occludore: {flt_txt} (Tasto 'O')",
+                f"Strategia: Affordance Semantica Permissiva"
+            ]
+            meta_colors  = ['#334155', '#334155', '#0F172A', flt_col, '#E11D48']
+            meta_weights = ['normal', 'normal', 'bold', 'bold', 'bold']
+        else:  # NEURO_SIMB
+            flt_txt = "ATTIVO" if getattr(self, 'use_occluder_filter', True) else "DISATTIVATO"
+            flt_col = '#15803D' if getattr(self, 'use_occluder_filter', True) else '#EA580C'
+            meta_lines = [
+                f"Dataset: nuScenes ({self.scene_name})",
+                f"Campione: {self.current_idx + 1} / {self.total_frames}",
+                f"Ostacoli Sintetici Previsti: {total_occluded}",
+                f"Filtro Occludore: {flt_txt} (Tasto 'O')",
+                f"Strategia: Ibrida (Spazio 3D + Mappa HD)"
+            ]
+            meta_colors  = ['#334155', '#334155', '#0F172A', flt_col, '#7C3AED']
+            meta_weights = ['normal', 'normal', 'bold', 'bold', 'bold']
         y_m = 0.48
         for idx_l, line in enumerate(meta_lines):
             ax_telemetry.text(0.35, y_m, line, transform=ax_telemetry.transAxes,
@@ -848,18 +947,20 @@ class GroundTruthOcclusionVisualizer:
                        transform=ax_legend.transAxes, fontsize=6.8, color='#64748B', ha='center', va='center', style='italic')
 
         # Menu a tendina interattivo per la selezione della modalità Ground Truth
-        ax_dd = self.fig.add_axes([0.575, 0.938, 0.270, 0.036])
+        ax_dd = self.fig.add_axes([0.565, 0.938, 0.280, 0.036])
         mode_labels = {
-            "NEURO_SIMB": "★ GT Neuro-Simbolica (Spazio+HDMap)",
+            "NEURO_SIMB": "★ GT Ibrida (Spazio+HDMap)",
+            "GEOMETRICA": "★ GT Geometrica (Fitting 3D)",
+            "SEMANTICA": "★ GT Semantica (Regole Naïve)",
             "REALE": "GT Reale nuScenes (Tutte le Zone)",
             "REALE_POSITIVES": "GT Reale (Solo Positivi)",
-            "SINTETICA_HYBRID": "★ GT Neuro-Simbolica (Spazio+HDMap)",
-            "HYBRID": "★ GT Neuro-Simbolica (Spazio+HDMap)"
+            "SINTETICA_HYBRID": "★ GT Ibrida (Spazio+HDMap)",
+            "HYBRID": "★ GT Ibrida (Spazio+HDMap)"
         }
         curr_lbl = mode_labels.get(self.gt_mode, self.gt_mode)
         arrow = "▲" if getattr(self, 'dropdown_open', False) else "▼"
         self.btn_mode = Button(ax_dd, f"Modalità: {curr_lbl}  {arrow}", color='#F8FAFC', hovercolor='#E2E8F0')
-        self.btn_mode.label.set_fontsize(8.2)
+        self.btn_mode.label.set_fontsize(8.0)
         self.btn_mode.label.set_fontweight('bold')
         self.btn_mode.label.set_color(c_border)
         self.btn_mode.on_clicked(self.toggle_dropdown)
@@ -879,7 +980,7 @@ class GroundTruthOcclusionVisualizer:
 
         # Barra inferiore comandi
         self.fig.text(0.50, 0.012,
-                      "[<- / ->]: Frame  |  [B / Menu a tendina]: Cambia Modalità GT  |  [Hover Mouse]: Dettagli Zona  |  [S]: Salva HD 300 DPI",
+                      "[<- / ->]: Frame  |  [B / Menu a tendina]: Cambia Modalità GT  |  [O]: Filtro Occludore ON/OFF  |  [Hover Mouse]: Dettagli  |  [S]: Salva HD",
                       fontsize=8.0, color='#64748B', ha='center', style='italic')
 
         self.fig.canvas.draw_idle()
@@ -898,7 +999,7 @@ class GroundTruthOcclusionVisualizer:
         self._hide_dropdown_menu()
         self.dropdown_open = True
 
-        self.ax_menu = self.fig.add_axes([0.575, 0.816, 0.270, 0.120], facecolor='#FFFFFF', zorder=100)
+        self.ax_menu = self.fig.add_axes([0.565, 0.748, 0.280, 0.188], facecolor='#FFFFFF', zorder=100)
         self.ax_menu.set_xticks([])
         self.ax_menu.set_yticks([])
         for spine in self.ax_menu.spines.values():
@@ -906,12 +1007,14 @@ class GroundTruthOcclusionVisualizer:
             spine.set_linewidth(1.3)
 
         modes = [
-            ("NEURO_SIMB", "1. ★ GT Neuro-Simbolica (Spazio 3D + HD-Map)"),
-            ("REALE", "2. GT Reale nuScenes (Tutte le Zone 3D)"),
-            ("REALE_POSITIVES", "3. GT Reale (Solo Zone con Oggetto)")
+            ("NEURO_SIMB", "1. ★ GT Ibrida (Spazio 3D + HD-Map)"),
+            ("GEOMETRICA", "2. ★ GT Geometrica (Fitting 3D)"),
+            ("SEMANTICA", "3. ★ GT Semantica (Regole Naïve)"),
+            ("REALE", "4. GT Reale nuScenes (Tutte le Zone)"),
+            ("REALE_POSITIVES", "5. GT Reale (Solo Zone con Oggetto)")
         ]
         
-        y_offsets = [0.080, 0.041, 0.002]
+        y_offsets = [0.148, 0.111, 0.074, 0.037, 0.001]
         self.menu_buttons = []
         for (m_key, m_lbl), y_off in zip(modes, y_offsets):
             is_active = (self.gt_mode == m_key)
@@ -919,9 +1022,9 @@ class GroundTruthOcclusionVisualizer:
             bg_col = '#EFF6FF' if is_active else '#FFFFFF'
             txt_col = '#1D4ED8' if is_active else '#334155'
             
-            ax_item = self.fig.add_axes([0.577, 0.816 + y_off, 0.266, 0.036], zorder=101)
+            ax_item = self.fig.add_axes([0.567, 0.748 + y_off, 0.276, 0.035], zorder=101)
             btn = Button(ax_item, prefix + m_lbl, color=bg_col, hovercolor='#E0F2FE')
-            btn.label.set_fontsize(8.0)
+            btn.label.set_fontsize(7.8)
             btn.label.set_fontweight('bold' if is_active else 'normal')
             btn.label.set_color(txt_col)
             btn.label.set_ha('left')
@@ -965,9 +1068,14 @@ class GroundTruthOcclusionVisualizer:
             self.load_frame(self.current_idx + 1)
         elif event.key in ['left', 'a', 'A']:
             self.load_frame(self.current_idx - 1)
+        elif event.key in ['o', 'O']:
+            self.use_occluder_filter = not getattr(self, 'use_occluder_filter', True)
+            st = "ATTIVO" if self.use_occluder_filter else "DISATTIVATO"
+            print(f"\n>>> [FILTRO COMPATIBILITA OCCLUDORE] Stato: {st}")
+            self.render()
         elif event.key in ['b', 'B']:
-            # Cicla tra le 3 modalità
-            mode_cycle = ["NEURO_SIMB", "REALE", "REALE_POSITIVES"]
+            # Cicla tra le 5 modalità
+            mode_cycle = ["NEURO_SIMB", "GEOMETRICA", "SEMANTICA", "REALE", "REALE_POSITIVES"]
             curr_idx = mode_cycle.index(self.gt_mode) if self.gt_mode in mode_cycle else 0
             self.gt_mode = mode_cycle[(curr_idx + 1) % len(mode_cycle)]
             print(f"\n>>> [GROUND TRUTH TOGGLE] Modalità attiva: {self.gt_mode}")
@@ -1126,12 +1234,19 @@ class GroundTruthOcclusionVisualizer:
                 }
                 src_fmt = src_map.get(src, src)
 
+                occ_wlh = hovered_item.get('occ_wlh', None)
+                if getattr(self, 'use_occluder_filter', True):
+                    flt_info = get_occluder_filter_explanation(src, occ_wlh)
+                else:
+                    flt_info = "Disattivato (Tasto 'O')"
+
                 tt_text = (
                     f"ZONA OCCLUSA (Raycasting)\n"
-                    f"• Chi la genera:  {src_fmt}\n"
-                    f"• Dimensione:     Area {area:.1f} m²\n"
-                    f"• Semantica:      {label}\n"
-                    f"• Distanza da Ego: {dist:.1f} m"
+                    f"• Chi la genera:    {src_fmt}\n"
+                    f"• Vincolo Occludore: {flt_info}\n"
+                    f"• Dimensione:       Area {area:.1f} m²\n"
+                    f"• Semantica:        {label}\n"
+                    f"• Distanza da Ego:   {dist:.1f} m"
                 )
 
                 self.tooltip.set_text(tt_text)
@@ -1148,9 +1263,9 @@ def main():
     parser = argparse.ArgumentParser(description="Visualizzatore Tesi Ground Truth nelle Zone Occluse")
     parser.add_argument("frame", nargs="?", type=int, default=1, help="Numero del frame iniziale (1-404)")
     parser.add_argument("--mode", "-m",
-                        choices=["NEURO_SIMB", "REALE", "REALE_POSITIVES", "HYBRID", "SINTETICA_HYBRID", "SINTETICA"],
+                        choices=["NEURO_SIMB", "GEOMETRICA", "SEMANTICA", "REALE", "REALE_POSITIVES", "HYBRID", "GEOMETRIC", "SEMANTIC", "SINTETICA_HYBRID", "SINTETICA"],
                         default="NEURO_SIMB",
-                        help="Modalità iniziale della Ground Truth ('NEURO_SIMB', 'REALE', 'REALE_POSITIVES')")
+                        help="Modalità iniziale della Ground Truth ('NEURO_SIMB', 'GEOMETRICA', 'SEMANTICA', 'REALE', 'REALE_POSITIVES')")
     parser.add_argument("--save", action="store_true", help="Salva screenshot a 300 DPI ed esce")
     args = parser.parse_args()
 

@@ -22,9 +22,19 @@ import torch.nn.functional as F
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from dataset_adapter.factory_dataset import create_adapter
-from ground_truth.ground_truth_extractor import extract_ground_truth_masks, rasterize_polygon, get_occlusion_ground_truth_target
-from ground_truth.ground_truth_extractor_synthetic import compute_synthetic_ground_truth, to_macro_classes_4
+from ground_truth.ground_truth_extractor import (
+    extract_ground_truth_masks,
+    rasterize_polygon,
+    get_occlusion_ground_truth_target,
+    extract_real_occlusion_ground_truth
+)
+from ground_truth.ground_truth_extractor_synthetic import (
+    compute_synthetic_ground_truth,
+    to_macro_classes_4,
+    apply_occluder_compatibility_filter
+)
 from architettura_neurale import AttentionPerZoneModel
+from shapely.geometry import Point as ShapelyPoint, Polygon as ShapelyPoly
 
 GRID_DIM = 200        # 200x200 pixel BEV
 GRID_RANGE = 40.0     # [-40m, +40m]
@@ -145,6 +155,20 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
             for gt_type in ["GT_Reale", "GT_Sintetica_Geom", "GT_Sintetica_Sem", "GT_Sintetica_Hyb"]
         }
 
+    MODEL_KEY_MAP = {
+        "hybrid": "NEURO_SIMB",
+        "real": "REAL_GT",
+        "positives_only": "POS_ONLY",
+        "bayes": "BAYES",
+        "geometric": "GEOMETRIC",
+        "semantic": "SEMANTIC"
+    }
+
+    eval_cache = {
+        "split": split,
+        "frames": {}
+    }
+
     print(f"\nInizio scansione split [{split.upper()}] (passaggio unico ultra-rapido per tutti i modelli)...")
     for proc_i, idx in enumerate(valid_frame_indices):
         if (proc_i + 1) % 50 == 0 or proc_i == len(valid_frame_indices) - 1:
@@ -153,27 +177,78 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
         frame_data = adapter.get_sample_data(idx)
         token = frame_data["sample_token"]
 
-        target_masks = extract_ground_truth_masks(frame_data)
-        semantic_map = frame_data['semantic_map']
-        drivable_mask = np.maximum(semantic_map['drivable_area'], semantic_map.get('carpark_area', np.zeros_like(semantic_map['drivable_area'])))
-        walkway_mask = semantic_map.get('walkway', np.zeros_like(drivable_mask))
-        ped_crossing_mask = semantic_map.get('ped_crossing', np.zeros_like(drivable_mask))
-
-        input_channels = [
-            frame_data.get('lidar_bev', np.zeros((GRID_DIM, GRID_DIM))),
-            frame_data.get('occlusion_mask', np.zeros((GRID_DIM, GRID_DIM))),
-            drivable_mask,
-            walkway_mask,
-            ped_crossing_mask
-        ] + list(target_masks)
-
-        input_tensor = torch.tensor(np.stack(input_channels, axis=0), dtype=torch.float32)
+        frame_cache = {
+            "sample_token": token,
+            "models": {}
+        }
+        for m_k in models_dict:
+            ui_m = MODEL_KEY_MAP.get(m_k, m_k.upper())
+            frame_cache["models"][ui_m] = {
+                gt_k: {
+                    "stats": {c: {"tp": 0, "fp": 0, "fn": 0, "gt_count": 0, "pred_count": 0} for c in range(4)},
+                    "zones": []
+                }
+                for gt_k in ["REAL", "NEURO_SIMB", "GEOMETRIC", "SEMANTIC"]
+            }
 
         occ_file = os.path.join("extracted_occlusions", f"{token}.json")
         if not os.path.exists(occ_file):
             continue
         with open(occ_file) as f:
             occs = json.load(f)["occlusions"]
+
+        # Maschera circolare metrica a 25m per tagliare rigorosamente TUTTI gli 11 canali di input
+        r_grid = np.arange(GRID_DIM)
+        gy, gx = np.meshgrid(r_grid, r_grid)
+        mask_25m = (np.sqrt((gx - 99.5)**2 + (gy - 99.5)**2) * VOXEL_SIZE <= 25.0).astype(np.float32)
+        circle_25m = ShapelyPoint(0, 0).buffer(25.0)
+
+        # 1. Canale 0: LiDAR Density BEV entro 25m
+        lidar_bev = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
+        points = frame_data.get("points", np.zeros((0, 3)))
+        if len(points) > 0:
+            for px_m, py_m in points[:, :2]:
+                px = int((px_m + GRID_RANGE) / VOXEL_SIZE)
+                py = int((GRID_RANGE - py_m) / VOXEL_SIZE)
+                if 0 <= px < GRID_DIM and 0 <= py < GRID_DIM:
+                    lidar_bev[py, px] = 1.0
+        lidar_bev = lidar_bev * mask_25m
+
+        # 2. Canale 1: Ombre Raycasting cumulative entro 25m
+        occlusion_mask = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
+        for occ in occs:
+            pts = occ.get("polygon_points_m", [])
+            if len(pts) >= 3:
+                sp_occ = ShapelyPoly(pts)
+                if not sp_occ.is_valid:
+                    sp_occ = sp_occ.buffer(0)
+                sp_occ_25 = sp_occ.intersection(circle_25m)
+                if not sp_occ_25.is_empty and sp_occ_25.area >= 0.1:
+                    sub_geoms = list(sp_occ_25.geoms) if sp_occ_25.geom_type == 'MultiPolygon' else [sp_occ_25]
+                    for sg in sub_geoms:
+                        coords = np.array(sg.exterior.coords)[:-1]
+                        m = rasterize_polygon(coords)
+                        occlusion_mask = np.maximum(occlusion_mask, m)
+        occlusion_mask = occlusion_mask * mask_25m
+
+        # 3. Canali 2, 3, 4: HD Map entro 25m
+        semantic_map = frame_data['semantic_map']
+        drivable_mask = (np.maximum(semantic_map['drivable_area'], semantic_map.get('carpark_area', np.zeros_like(semantic_map['drivable_area'])))) * mask_25m
+        walkway_mask = (semantic_map.get('walkway', np.zeros_like(drivable_mask))) * mask_25m
+        ped_crossing_mask = (semantic_map.get('ped_crossing', np.zeros_like(drivable_mask))) * mask_25m
+
+        # 4. Canali 5-10: Ostacoli visibili nuScenes entro 25m
+        target_masks = extract_ground_truth_masks(frame_data) * mask_25m
+
+        input_channels = [
+            lidar_bev,
+            occlusion_mask,
+            drivable_mask,
+            walkway_mask,
+            ped_crossing_mask
+        ] + list(target_masks)
+
+        input_tensor = torch.tensor(np.stack(input_channels, axis=0), dtype=torch.float32)
 
         bayes_occs = []
         if "bayes" in models_dict and token in bayes_lookup:
@@ -185,82 +260,108 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
 
         import cv2
         dt_road_map = cv2.distanceTransform((1 - drivable_mask).astype(np.uint8), cv2.DIST_L2, 3) * VOXEL_SIZE
+        all_frame_boxes = frame_data.get('boxes', [])
+        boxes_by_token = {b.token: b for b in all_frame_boxes}
+        occluder_tokens = {occ.get('object_token') for occ in occs if occ.get('object_token')}
+
+        circle_25m = ShapelyPoint(0, 0).buffer(25.0)
 
         for occ_idx, occ in enumerate(occs):
-            dist = occ.get("distance_m", 0.0)
-            if dist > 25.0:
-                continue
             pts = occ.get("polygon_points_m", [])
             pts_np = np.array(pts)
             if len(pts_np) < 3:
                 continue
-            poly_xy = np.column_stack([pts_np[:, 1], pts_np[:, 0]])
+            poly_xy = pts_np[:, :2]
 
-            from shapely.geometry import Polygon as ShapelyPoly
             sp = ShapelyPoly(poly_xy)
-
-            occ_mask = rasterize_polygon(pts)
-            tot = np.sum(occ_mask)
-            road_f = np.sum(occ_mask * drivable_mask) / tot if tot > 0 else 0
-            side_f = np.sum(occ_mask * walkway_mask) / tot if tot > 0 else 0
-            cross_f = np.sum(occ_mask * ped_crossing_mask) / tot if tot > 0 else 0
-            terr_f = max(0.0, 1.0 - (road_f + side_f + cross_f))
-            area = float(occ.get("area_sqm", 0.0))
-
-            # Calcolo prossimità bordo strada (accosto / parcheggio entro 2.5m)
-            min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
-            roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
-
-            # 1. Target GT REALE a 4 macro-classi
-            gt_raw_6 = get_occlusion_ground_truth_target(target_masks, pts)
-            gt_real_4 = to_macro_classes_4(gt_raw_6)
-
-            # 2. Target GT SINTETICA GEOMETRICA a 4 macro-classi (Fitting 3D)
-            gt_geom_6, _ = compute_synthetic_ground_truth(
-                sp=sp, road_f=road_f, side_f=side_f, cross_f=cross_f,
-                area=area, dist=dist, gt_raw_6=gt_raw_6, mode="geometric"
-            )
-            gt_geom_4 = to_macro_classes_4(gt_geom_6)
-
-            # 3. Target GT SINTETICA SEMANTICA a 4 macro-classi (Regole Naïve)
-            gt_sem_6, _ = compute_synthetic_ground_truth(
-                sp=sp, road_f=road_f, side_f=side_f, cross_f=cross_f,
-                area=area, dist=dist, gt_raw_6=gt_raw_6, mode="semantic"
-            )
-            gt_sem_4 = to_macro_classes_4(gt_sem_6)
-
-            # 4. Target GT SINTETICA IBRIDA a 4 macro-classi (Spatio-Semantic con sosta/accosto)
-            gt_hyb_6, _ = compute_synthetic_ground_truth(
-                sp=sp, road_f=road_f, side_f=side_f, cross_f=cross_f,
-                roadside_f=roadside_f, area=area, dist=dist, gt_raw_6=gt_raw_6, mode="hybrid"
-            )
-            gt_hyb_4 = to_macro_classes_4(gt_hyb_6)
-
-            # Ritaglio patch BEV 64x64
-            px_x = np.clip(((poly_xy[:, 0] + GRID_RANGE) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
-            px_y = np.clip(((GRID_RANGE - poly_xy[:, 1]) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
-            xmin, xmax = max(0, np.min(px_x) - 2), min(GRID_DIM - 1, np.max(px_x) + 2)
-            ymin, ymax = max(0, np.min(px_y) - 2), min(GRID_DIM - 1, np.max(px_y) + 2)
-            if xmax <= xmin or ymax <= ymin:
+            if not sp.is_valid or sp.area <= 0.01:
+                sp = sp.buffer(0)
+            if not sp.is_valid or sp.area <= 0.01:
                 continue
 
-            patch = input_tensor[:, ymin:ymax+1, xmin:xmax+1]
-            patch_res = F.interpolate(patch.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).to(device)
+            sp_25m = sp.intersection(circle_25m)
+            if sp_25m.is_empty or sp_25m.area < 0.1:
+                continue
 
-            if sp.is_valid and sp.area > 0.01:
-                mrr = sp.minimum_rotated_rectangle
+            occ_name = occ.get("object_name", None)
+            occ_tok = occ.get("object_token", None)
+            b_obj = boxes_by_token.get(occ_tok, None)
+            occ_wlh = b_obj.wlh if (b_obj is not None and hasattr(b_obj, 'wlh')) else None
+
+            sub_polys = list(sp_25m.geoms) if sp_25m.geom_type == 'MultiPolygon' else [sp_25m]
+            for sp_sub in sub_polys:
+                if sp_sub.area < 0.1:
+                    continue
+
+                vis_coords = np.array(sp_sub.exterior.coords)[:-1]
+                if len(vis_coords) < 3:
+                    continue
+
+                occ_mask = rasterize_polygon(vis_coords)
+                tot = np.sum(occ_mask)
+                road_f = np.sum(occ_mask * drivable_mask) / tot if tot > 0 else 0
+                side_f = np.sum(occ_mask * walkway_mask) / tot if tot > 0 else 0
+                cross_f = np.sum(occ_mask * ped_crossing_mask) / tot if tot > 0 else 0
+                terr_f = max(0.0, 1.0 - (road_f + side_f + cross_f))
+                area = float(sp_sub.area)
+                dist = float(np.hypot(sp_sub.centroid.x, sp_sub.centroid.y))
+
+                # Calcolo prossimità bordo strada (accosto / parcheggio entro 2.5m)
+                min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
+                roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
+
+                # 1. Target GT REALE a 4 macro-classi (escludendo categoricamente gli occludori)
+                gt_raw_6, gt_real_4 = extract_real_occlusion_ground_truth(
+                    all_frame_boxes, sp_sub, occluder_tokens=occluder_tokens
+                )
+
+                # 2. Target GT SINTETICA GEOMETRICA a 4 macro-classi (Fitting 3D)
+                gt_geom_6, _ = compute_synthetic_ground_truth(
+                    sp=sp_sub, sp_sample=sp_sub, road_f=road_f, side_f=side_f, cross_f=cross_f,
+                    area=area, dist=dist, gt_raw_6=gt_raw_6, mode="geometric",
+                    occluder_name=occ_name, occluder_wlh=occ_wlh, use_occluder_filter=True
+                )
+                gt_geom_4 = to_macro_classes_4(gt_geom_6)
+
+                # 3. Target GT SINTETICA SEMANTICA a 4 macro-classi (Regole Naïve)
+                gt_sem_6, _ = compute_synthetic_ground_truth(
+                    sp=sp_sub, sp_sample=sp_sub, road_f=road_f, side_f=side_f, cross_f=cross_f,
+                    area=area, dist=dist, gt_raw_6=gt_raw_6, mode="semantic",
+                    occluder_name=occ_name, occluder_wlh=occ_wlh, use_occluder_filter=True
+                )
+                gt_sem_4 = to_macro_classes_4(gt_sem_6)
+
+                # 4. Target GT SINTETICA IBRIDA a 4 macro-classi (Spatio-Semantic con sosta/accosto)
+                gt_hyb_6, _ = compute_synthetic_ground_truth(
+                    sp=sp_sub, sp_sample=sp_sub, road_f=road_f, side_f=side_f, cross_f=cross_f,
+                    roadside_f=roadside_f, area=area, dist=dist, gt_raw_6=gt_raw_6, mode="hybrid",
+                    occluder_name=occ_name, occluder_wlh=occ_wlh, use_occluder_filter=True
+                )
+                gt_hyb_4 = to_macro_classes_4(gt_hyb_6)
+
+                # Ritaglio patch BEV 64x64 calcolato strettamente sui pixel entro 25m
+                px_x = np.clip(((vis_coords[:, 0] + GRID_RANGE) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
+                px_y = np.clip(((GRID_RANGE - vis_coords[:, 1]) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
+                xmin, xmax = max(0, np.min(px_x) - 2), min(GRID_DIM - 1, np.max(px_x) + 2)
+                ymin, ymax = max(0, np.min(px_y) - 2), min(GRID_DIM - 1, np.max(px_y) + 2)
+                if xmax <= xmin or ymax <= ymin:
+                    continue
+
+                patch = input_tensor[:, ymin:ymax+1, xmin:xmax+1]
+                patch_res = F.interpolate(patch.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).to(device)
+
+                mrr = sp_sub.minimum_rotated_rectangle
                 mrr_coords = np.array(mrr.exterior.coords)[:-1]
                 e1 = np.linalg.norm(mrr_coords[0] - mrr_coords[1])
                 e2 = np.linalg.norm(mrr_coords[1] - mrr_coords[2])
                 obb_w, obb_l = float(min(e1, e2)), float(max(e1, e2))
-            else:
-                obb_w, obb_l = 0.5, 0.5
 
-            scalars = torch.tensor([[area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]], dtype=torch.float32).to(device)
+                scalars = torch.tensor([[area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]], dtype=torch.float32).to(device)
 
             # Esegue inferenza simultanea su tutti i modelli
             with torch.no_grad():
                 for m_key, m_info in models_dict.items():
+                    ui_m = MODEL_KEY_MAP.get(m_key, m_key.upper())
                     if m_key == "bayes":
                         b_occ = bayes_occs[occ_idx] if occ_idx < len(bayes_occs) else {}
                         b_probs = b_occ.get("estimated_probabilities", {})
@@ -268,27 +369,31 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                         p_camion = float(max(b_probs.get("Camion", 0.0), b_probs.get("Bus", 0.0), b_probs.get("Rimorchio", 0.0)))
                         p_vru = float(max(b_probs.get("Pedone", 0.0), b_probs.get("Bicicletta", 0.0), b_probs.get("Moto", 0.0)))
                         p_barr = float(max(b_probs.get("Barriera", 0.0), b_probs.get("Cono", 0.0)))
+                        p4 = [p_auto, p_camion, p_vru, p_barr]
                         pred_4 = np.array([
-                            int(p_auto >= 0.25),
-                            int(p_camion >= 0.20),
+                            int(p_auto >= 0.28 and area >= 3.5),
+                            int(p_camion >= 0.25 and area >= 8.0),
                             int(p_vru >= 0.25),
-                            int(p_barr >= 0.25)
+                            int(p_barr >= 0.26)
                         ], dtype=int)
                     else:
                         model = m_info["model"]
-                        out_6 = torch.sigmoid(model(patch_res, scalars)).squeeze(0).cpu().numpy()
+                        occluder_mask = AttentionPerZoneModel.build_compatibility_mask(occ_name, occ_wlh, device=device)
+                        out_6 = torch.sigmoid(model(patch_res, scalars, occluder_mask=occluder_mask)).squeeze(0).cpu().numpy()
 
-                        # Binarizzazione a soglie calibrate per classe (Optimal Safety-Critical Operating Points)
-                        # - Camion/Bus: 0.20 (classe rara e grande, massimizza la cattura di tir nei cantieri/parcheggi)
-                        # - Auto: 0.25 (ottimo compromesso Precision/Recall)
-                        # - VRU (Pedoni/Bici): 0.25 (safety-first assoluto)
-                        # - Barriere: 0.25 (intercetta tutti i cantieri e transenne)
+                        p4 = [
+                            float(out_6[0]),
+                            float(out_6[1]),
+                            float(max(out_6[2], out_6[3], out_6[4])),
+                            float(out_6[5])
+                        ]
                         pred_4 = np.zeros(4, dtype=int)
-                        pred_4[0] = int(out_6[0] >= 0.25)
-                        pred_4[1] = int(out_6[1] >= 0.20)
+                        pred_4[0] = int(out_6[0] >= 0.28 and area >= 3.5)
+                        pred_4[1] = int(out_6[1] >= 0.25 and area >= 8.0)
                         pred_4[2] = int(max(out_6[2], out_6[3], out_6[4]) >= 0.25)
-                        pred_4[3] = int(out_6[5] >= 0.25)
+                        pred_4[3] = int(out_6[5] >= 0.26)
 
+                    # Aggiorna conteggi globali per raggio
                     for r in RADII:
                         if dist <= r:
                             for c in range(4):
@@ -316,6 +421,72 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                                 if th == 1 and pr == 1: counts[m_key]["GT_Sintetica_Hyb"][r][c]["tp"] += 1
                                 elif th == 0 and pr == 1: counts[m_key]["GT_Sintetica_Hyb"][r][c]["fp"] += 1
                                 elif th == 1 and pr == 0: counts[m_key]["GT_Sintetica_Hyb"][r][c]["fn"] += 1
+
+                    # Aggiorna la cache del fotogramma per il visualizzatore
+                    gt_map = {
+                        "REAL": gt_real_4,
+                        "NEURO_SIMB": gt_hyb_4,
+                        "GEOMETRIC": gt_geom_4,
+                        "SEMANTIC": gt_sem_4
+                    }
+                    pred_binary = [int(x) for x in pred_4]
+                    max_class_idx = int(np.argmax(p4))
+                    max_prob = float(p4[max_class_idx])
+
+                    for gt_k, gt_curr in gt_map.items():
+                        gt_binary = [int(x) for x in gt_curr]
+                        st = frame_cache["models"][ui_m][gt_k]["stats"]
+                        z_tps = [c for c in range(4) if pred_binary[c] == 1 and gt_binary[c] == 1]
+                        z_fps = [c for c in range(4) if pred_binary[c] == 1 and gt_binary[c] == 0]
+                        z_fns = [c for c in range(4) if pred_binary[c] == 0 and gt_binary[c] == 1]
+
+                        for c in range(4):
+                            if gt_binary[c] == 1: st[c]["gt_count"] += 1
+                            if pred_binary[c] == 1: st[c]["pred_count"] += 1
+                            if pred_binary[c] == 1 and gt_binary[c] == 1: st[c]["tp"] += 1
+                            elif pred_binary[c] == 1 and gt_binary[c] == 0: st[c]["fp"] += 1
+                            elif pred_binary[c] == 0 and gt_binary[c] == 1: st[c]["fn"] += 1
+
+                        if len(z_tps) > 0 and len(z_fns) == 0:
+                            v_label = f"TRUE POSITIVE ({CATEGORIES[z_tps[0]]})"; verdict = "TP"
+                        elif len(z_tps) > 0 and len(z_fns) > 0:
+                            v_label = f"PARZIALE: TP ({', '.join(CATEGORIES[c] for c in z_tps)}) + FN ({', '.join(CATEGORIES[c] for c in z_fns)})"; verdict = "TP/FN"
+                        elif len(z_fns) > 0 and len(z_fps) == 0:
+                            v_label = f"FALSE NEGATIVE ({CATEGORIES[z_fns[0]]})"; verdict = "FN"
+                        elif len(z_fns) > 0 and len(z_fps) > 0:
+                            v_label = f"FALSE NEGATIVE ({CATEGORIES[z_fns[0]]})"; verdict = "FN"
+                        elif len(z_fps) > 0:
+                            v_label = f"FALSE POSITIVE ({CATEGORIES[z_fps[0]]})"; verdict = "FP"
+                        else:
+                            v_label = "TRUE NEGATIVE (Zona Libera)"; verdict = "TN"
+
+                        frame_cache["models"][ui_m][gt_k]["zones"].append({
+                            "occ_idx": occ_idx,
+                            "probs_4": [round(float(x), 4) for x in p4],
+                            "pred_binary": pred_binary,
+                            "gt_target_4": gt_binary,
+                            "verdict": verdict,
+                            "verdict_label": v_label,
+                            "risk_score": round(max_prob, 4),
+                            "pred_class": CATEGORIES[max_class_idx],
+                            "pred_idx": max_class_idx
+                        })
+
+        # Calcola f1/rec/prec aggregate per questo frame
+        for ui_m in frame_cache["models"]:
+            for gt_k in frame_cache["models"][ui_m]:
+                st = frame_cache["models"][ui_m][gt_k]["stats"]
+                t_tp = sum(st[c]["tp"] for c in range(4))
+                t_fp = sum(st[c]["fp"] for c in range(4))
+                t_fn = sum(st[c]["fn"] for c in range(4))
+                pr = (t_tp / (t_tp + t_fp) * 100.0) if (t_tp + t_fp) > 0 else 0.0
+                rc = (t_tp / (t_tp + t_fn) * 100.0) if (t_tp + t_fn) > 0 else 0.0
+                f1 = (2 * pr * rc / (pr + rc)) if (pr + rc) > 0 else 0.0
+                frame_cache["models"][ui_m][gt_k]["f1"] = round(f1, 2)
+                frame_cache["models"][ui_m][gt_k]["recall"] = round(rc, 2)
+                frame_cache["models"][ui_m][gt_k]["precision"] = round(pr, 2)
+
+        eval_cache["frames"][str(idx)] = frame_cache
 
     # Stampa dettagliata delle tabelle di risultato per ciascun modello
     print("\n" + "=" * 95)
@@ -365,10 +536,10 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
         print("-" * 95)
 
     # Esportazione e aggiornamento automatico dei report Markdown per la tesi
-    export_markdown_results(counts, models_dict, split)
+    export_markdown_results(counts, models_dict, split, eval_cache)
 
 
-def export_markdown_results(counts, models_dict, split):
+def export_markdown_results(counts, models_dict, split, eval_cache=None):
     """
     Esporta automaticamente i risultati della valutazione in un report Markdown dedicato
     e aggiorna il file ufficiale documentazione/TABELLA_RISULTATI_COMPLETA.md.
@@ -435,6 +606,17 @@ def export_markdown_results(counts, models_dict, split):
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(f"# Report Ufficiale di Valutazione nuScenes - Split {split.upper()}\n" + md_content)
     print(f"\n[REPORT SALVATO]: File Markdown aggiornato in: {out_file}")
+
+    # Salva la cache JSON con tutti i frame precalcolati per il visualizzatore
+    if eval_cache is not None:
+        cache_split_path = os.path.join(os.path.dirname(__file__), f"cache_valutazione_{split.lower()}.json")
+        cache_default_path = os.path.join(os.path.dirname(__file__), "cache_valutazione_ufficiale.json")
+        with open(cache_split_path, "w", encoding="utf-8") as cf:
+            json.dump(eval_cache, cf)
+        if split.lower() == "all" or not os.path.exists(cache_default_path):
+            with open(cache_default_path, "w", encoding="utf-8") as cf:
+                json.dump(eval_cache, cf)
+        print(f"[CACHE VALUTAZIONE SALVATA]:\n  - {cache_split_path}\n  - {cache_default_path}")
 
 
 def main():
