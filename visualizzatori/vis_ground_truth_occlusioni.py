@@ -94,6 +94,7 @@ class GroundTruthOcclusionVisualizer:
             self.gt_mode = "NEURO_SIMB"
 
         self.use_occluder_filter = True
+        self.show_occluders = True
 
         # Setup tipografia accademica
         plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica']
@@ -234,12 +235,13 @@ class GroundTruthOcclusionVisualizer:
         In modalità SINTETICA: restituisce ([], syn_boxes)
           - syn_boxes: ostacoli sintetici verosimili generati dentro le ombre
         """
+        all_boxes = self.frame_data.get('boxes', [])
+        real_occluders, real_occluded, _ = extract_real_occlusion_boxes(
+            all_boxes, self.occlusions, max_range=self.max_range
+        )
+
         if self.gt_mode in ["REALE", "REALE_POSITIVES"]:
-            all_boxes = self.frame_data.get('boxes', [])
-            occluders, occluded_boxes, _ = extract_real_occlusion_boxes(
-                all_boxes, self.occlusions, max_range=self.max_range
-            )
-            return occluders, occluded_boxes
+            return real_occluders, real_occluded
 
         else:
             # Modalità SINTETICA NEURO-SIMBOLICA (Spazio 3D + HD-Map entro 25m)
@@ -348,7 +350,7 @@ class GroundTruthOcclusionVisualizer:
                             sb = SyntheticBox(obj_name, [cx, cy, 0.5], wlh, yaw=yaw, token=f"syn_{idx}_{s_idx}_{int(abs(cx*10))}")
                             syn_boxes.append(sb)
 
-            return [], syn_boxes
+            return real_occluders, syn_boxes
 
     # =========================================================================
     # RENDERING CON ICONE VETTORIALI STILIZZATE E MINIMALI
@@ -417,8 +419,8 @@ class GroundTruthOcclusionVisualizer:
 
         # Titolo visualizzatore con indicazione Ground Truth attiva
         self.fig.text(0.03, 0.956,
-                      f"Figure 3: Visualizzazione Ground Truth nelle Zone Occluse (BEV Raggio {int(self.max_range)}m)",
-                      fontsize=11.5, fontweight='bold', color='#0F172A', ha='left', va='center')
+                      f"Figure 3: Ground Truth Zone Occluse (BEV {int(self.max_range)}m)",
+                      fontsize=10.5, fontweight='bold', color='#0F172A', ha='left', va='center')
 
         # =====================================================================
         # 1. PANNELLO SINISTRA: MAPPA BEV COMPLETA AD ALTA FEDELTÀ
@@ -669,12 +671,22 @@ class GroundTruthOcclusionVisualizer:
                 self.draw_icon_object(ax_map, 'traffic_cone', center=center_xy, length=1.5, deg=0.0, z_order=z_order)
             return cat
 
-        # --- Disegna OCCLUDERS (uguali all'altro visualizzatore) ---
-        if self.gt_mode == "REALE":
-            for box in occluders:
-                result = _draw_box(box, z_order=8)
-                if result:
-                    counts_occ[result] += 1
+        # --- Disegna OCCLUDERS (ostacoli che generano le zone d'ombra) ---
+        for box in occluders:
+            b_name = box.name.lower()
+            if "barrier" in b_name:      cat = "Barriers"
+            elif "pushable" in b_name or "pullable" in b_name: cat = "Carts"
+            elif "trafficcone" in b_name or "cone" in b_name: cat = "Cones"
+            elif "bicycle" in b_name:    cat = "Bicycles"
+            elif "motorcycle" in b_name: cat = "Motorcycles"
+            elif "pedestrian" in b_name or "human" in b_name: cat = "Pedestrians"
+            elif "car" in b_name or "emergency" in b_name:    cat = "Cars"
+            elif any(c in b_name for c in ["truck", "trailer", "bus", "construction"]): cat = "Trucks/Buses"
+            else: cat = None
+            if cat:
+                counts_occ[cat] += 1
+            if getattr(self, 'show_occluders', True):
+                _draw_box(box, z_order=8)
 
         # --- Disegna OCCLUDED (uguali, l'evidenziazione è nell'ombra arancione) ---
         for box in occluded_boxes:
@@ -759,11 +771,13 @@ class GroundTruthOcclusionVisualizer:
         # Dati descrittivi telemetria
         total_occluded = sum(counts.values())
         total_occluders = sum(counts_occ.values())
+        occ_status = "Visibili" if getattr(self, 'show_occluders', True) else "Nascosti"
+
         if self.gt_mode == "REALE":
             meta_lines = [
                 f"Dataset: nuScenes ({self.scene_name})",
                 f"Campione: {self.current_idx + 1} / {self.total_frames}",
-                f"Occluders (generano ombra): {total_occluders} oggetti",
+                f"Occluders: {total_occluders} ({occ_status})",
                 f"Occluded (dentro l'ombra): {total_occluded} oggetti",
                 f"Mostra: Tutte le zone d'ombra (con e senza ostacolo)"
             ]
@@ -773,11 +787,11 @@ class GroundTruthOcclusionVisualizer:
             meta_lines = [
                 f"Dataset: nuScenes ({self.scene_name})",
                 f"Campione: {self.current_idx + 1} / {self.total_frames}",
+                f"Occluders: {total_occluders} ({occ_status})",
                 f"Occluded Reali Rilevati: {total_occluded} oggetti",
-                f"Zone d'Ombra Rilevate: {len(self.drawn_occlusions)} (solo con ostacolo)",
                 f"Mostra: ESCLUSIVAMENTE zone con ostacoli reali"
             ]
-            meta_colors  = ['#334155', '#334155', '#7C3AED', '#D97706', '#B45309']
+            meta_colors  = ['#334155', '#334155', '#B45309', '#7C3AED', '#15803D']
             meta_weights = ['normal', 'normal', 'bold', 'bold', 'bold']
         elif self.gt_mode == "GEOMETRICA":
             flt_txt = "ATTIVO" if getattr(self, 'use_occluder_filter', True) else "DISATTIVATO"
@@ -785,11 +799,11 @@ class GroundTruthOcclusionVisualizer:
             meta_lines = [
                 f"Dataset: nuScenes ({self.scene_name})",
                 f"Campione: {self.current_idx + 1} / {self.total_frames}",
+                f"Occluders: {total_occluders} ({occ_status})",
                 f"Ostacoli Sintetici Previsti: {total_occluded}",
-                f"Filtro Occludore: {flt_txt} (Tasto 'O')",
-                f"Strategia: Fitting Spaziale 3D (Bounding Box)"
+                f"Fitting Spaziale 3D (Filtro 'O': {flt_txt})"
             ]
-            meta_colors  = ['#334155', '#334155', '#0F172A', flt_col, '#0284C7']
+            meta_colors  = ['#334155', '#334155', '#B45309', '#0F172A', flt_col]
             meta_weights = ['normal', 'normal', 'bold', 'bold', 'bold']
         elif self.gt_mode == "SEMANTICA":
             flt_txt = "ATTIVO" if getattr(self, 'use_occluder_filter', True) else "DISATTIVATO"
@@ -797,11 +811,11 @@ class GroundTruthOcclusionVisualizer:
             meta_lines = [
                 f"Dataset: nuScenes ({self.scene_name})",
                 f"Campione: {self.current_idx + 1} / {self.total_frames}",
+                f"Occluders: {total_occluders} ({occ_status})",
                 f"Ostacoli Sintetici Previsti: {total_occluded}",
-                f"Filtro Occludore: {flt_txt} (Tasto 'O')",
-                f"Strategia: Affordance Semantica Permissiva"
+                f"Affordance Semantica (Filtro 'O': {flt_txt})"
             ]
-            meta_colors  = ['#334155', '#334155', '#0F172A', flt_col, '#E11D48']
+            meta_colors  = ['#334155', '#334155', '#B45309', '#0F172A', flt_col]
             meta_weights = ['normal', 'normal', 'bold', 'bold', 'bold']
         else:  # NEURO_SIMB
             flt_txt = "ATTIVO" if getattr(self, 'use_occluder_filter', True) else "DISATTIVATO"
@@ -809,11 +823,11 @@ class GroundTruthOcclusionVisualizer:
             meta_lines = [
                 f"Dataset: nuScenes ({self.scene_name})",
                 f"Campione: {self.current_idx + 1} / {self.total_frames}",
-                f"Ostacoli Sintetici Previsti: {total_occluded}",
-                f"Filtro Occludore: {flt_txt} (Tasto 'O')",
+                f"Occluders: {total_occluders} ({occ_status})",
+                f"Ostacoli Sintetici: {total_occluded} (Filtro 'O': {flt_txt})",
                 f"Strategia: Ibrida (Spazio 3D + Mappa HD)"
             ]
-            meta_colors  = ['#334155', '#334155', '#0F172A', flt_col, '#7C3AED']
+            meta_colors  = ['#334155', '#334155', '#B45309', flt_col, '#7C3AED']
             meta_weights = ['normal', 'normal', 'bold', 'bold', 'bold']
         y_m = 0.48
         for idx_l, line in enumerate(meta_lines):
@@ -946,6 +960,26 @@ class GroundTruthOcclusionVisualizer:
         ax_legend.text(0.50, 0.04, "* Mostra ostacoli GT nelle zone d'ombra. Usa il Menu a tendina o premi [B] per cambiare modalità.",
                        transform=ax_legend.transAxes, fontsize=6.8, color='#64748B', ha='center', va='center', style='italic')
 
+        # Pulsante toggle per mostrare/nascondere gli occludori
+        ax_btn_occ = self.fig.add_axes([0.420, 0.938, 0.130, 0.036])
+        if getattr(self, 'show_occluders', True):
+            lbl_occ = "● Occlusori: ON"
+            bg_occ = '#EFF6FF'
+            hov_occ = '#DBEAFE'
+            txt_occ = '#1D4ED8'
+        else:
+            lbl_occ = "○ Occlusori: OFF"
+            bg_occ = '#F8FAFC'
+            hov_occ = '#E2E8F0'
+            txt_occ = '#64748B'
+
+        self.btn_occ = Button(ax_btn_occ, lbl_occ, color=bg_occ, hovercolor=hov_occ)
+        self.btn_occ.label.set_fontsize(8.0)
+        self.btn_occ.label.set_fontweight('bold')
+        self.btn_occ.label.set_color(txt_occ)
+        self.btn_occ.on_clicked(self.toggle_occluders)
+        self.ax_btn_occ = ax_btn_occ
+
         # Menu a tendina interattivo per la selezione della modalità Ground Truth
         ax_dd = self.fig.add_axes([0.565, 0.938, 0.280, 0.036])
         mode_labels = {
@@ -980,7 +1014,7 @@ class GroundTruthOcclusionVisualizer:
 
         # Barra inferiore comandi
         self.fig.text(0.50, 0.012,
-                      "[<- / ->]: Frame  |  [B / Menu a tendina]: Cambia Modalità GT  |  [O]: Filtro Occludore ON/OFF  |  [Hover Mouse]: Dettagli  |  [S]: Salva HD",
+                      "[<- / ->]: Frame  |  [B / Menu]: Modalità GT  |  [V / Bottone]: Occlusori ON/OFF  |  [O]: Filtro Occludore  |  [Hover Mouse]: Dettagli  |  [S]: Salva HD",
                       fontsize=8.0, color='#64748B', ha='center', style='italic')
 
         self.fig.canvas.draw_idle()
@@ -1053,6 +1087,12 @@ class GroundTruthOcclusionVisualizer:
         self.dropdown_open = False
         self.fig.canvas.draw_idle()
 
+    def toggle_occluders(self, event=None):
+        self.show_occluders = not getattr(self, 'show_occluders', True)
+        st = "VISIBILI" if self.show_occluders else "NASCOSTI"
+        print(f"\n>>> [TOGGLE OCCLUSORI] Visualizzazione occludori: {st}")
+        self.render()
+
     def select_gt_mode(self, mode_key):
         self.gt_mode = mode_key
         self.dropdown_open = False
@@ -1068,6 +1108,8 @@ class GroundTruthOcclusionVisualizer:
             self.load_frame(self.current_idx + 1)
         elif event.key in ['left', 'a', 'A']:
             self.load_frame(self.current_idx - 1)
+        elif event.key in ['v', 'V', 'h', 'H']:
+            self.toggle_occluders()
         elif event.key in ['o', 'O']:
             self.use_occluder_filter = not getattr(self, 'use_occluder_filter', True)
             st = "ATTIVO" if self.use_occluder_filter else "DISATTIVATO"

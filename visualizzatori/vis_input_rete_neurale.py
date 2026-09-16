@@ -86,6 +86,7 @@ class NeuralInputsVisualizer:
 
         self.max_range = float(max_range)
         self.show_auxiliary = bool(initial_aux)
+        self.show_full_c1 = False
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"• Dispositivo di Calcolo: {self.device}")
 
@@ -261,6 +262,7 @@ class NeuralInputsVisualizer:
         r_grid = np.arange(GRID_DIM)
         gy, gx = np.meshgrid(r_grid, r_grid)
         mask_25m = (np.sqrt((gx - 99.5)**2 + (gy - 99.5)**2) * VOXEL_SIZE <= self.max_range).astype(np.float32)
+        self.mask_25m = mask_25m
 
         # 1. Canale 0: LiDAR Density BEV (entro 25m)
         self.lidar_bev = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
@@ -352,6 +354,7 @@ class NeuralInputsVisualizer:
             raw_occs = []
 
         circle_25m = Point(0, 0).buffer(self.max_range)
+        boxes_by_token = {b.token: b for b in self.frame_data.get('boxes', [])}
 
         for i, occ in enumerate(raw_occs):
             pts = occ.get("polygon_points_m", [])
@@ -371,6 +374,16 @@ class NeuralInputsVisualizer:
             if poly_vis.is_empty or poly_vis.area < 0.1:
                 continue
 
+            occ_name = occ.get("object_name", "sconosciuto")
+            occ_tok = occ.get("object_token", None)
+            b_obj = boxes_by_token.get(occ_tok, None)
+            occ_wlh = b_obj.wlh if (b_obj is not None and hasattr(b_obj, 'wlh')) else None
+            occ_h = float(occ_wlh[2]) if (occ_wlh is not None and len(occ_wlh) >= 3) else None
+            occ_w = float(occ_wlh[0]) if (occ_wlh is not None and len(occ_wlh) >= 3) else None
+            occ_l = float(occ_wlh[1]) if (occ_wlh is not None and len(occ_wlh) >= 3) else None
+
+            compat_mask = AttentionPerZoneModel.build_compatibility_mask(occ_name, occ_wlh, device=self.device)
+
             sub_geoms = list(poly_vis.geoms) if poly_vis.geom_type == 'MultiPolygon' else [poly_vis]
             for poly_main in sub_geoms:
                 if poly_main.area < 0.1:
@@ -380,16 +393,16 @@ class NeuralInputsVisualizer:
                 if len(vis_coords) < 3:
                     continue
 
-                occ_mask = rasterize_polygon(vis_coords)
-                tot = np.sum(occ_mask)
-                road_f = float(np.sum(occ_mask * self.drivable_mask) / tot if tot > 0 else 0.0)
-                side_f = float(np.sum(occ_mask * self.walkway_mask) / tot if tot > 0 else 0.0)
-                cross_f = float(np.sum(occ_mask * self.ped_crossing_mask) / tot if tot > 0 else 0.0)
+                occ_mask_single = rasterize_polygon(vis_coords) * getattr(self, 'mask_25m', np.ones((GRID_DIM, GRID_DIM), dtype=np.float32))
+                tot = np.sum(occ_mask_single)
+                road_f = float(np.sum(occ_mask_single * self.drivable_mask) / tot if tot > 0 else 0.0)
+                side_f = float(np.sum(occ_mask_single * self.walkway_mask) / tot if tot > 0 else 0.0)
+                cross_f = float(np.sum(occ_mask_single * self.ped_crossing_mask) / tot if tot > 0 else 0.0)
                 terr_f = max(0.0, 1.0 - (road_f + side_f + cross_f))
                 area = float(poly_main.area)
                 dist = float(np.hypot(poly_main.centroid.x, poly_main.centroid.y))
 
-                min_d_road = float(np.min(dt_road_map[occ_mask > 0])) if tot > 0 else 99.0
+                min_d_road = float(np.min(dt_road_map[occ_mask_single > 0])) if tot > 0 else 99.0
                 roadside_f = max(0.0, 1.0 - (min_d_road / 2.5))
 
                 mrr = poly_main.minimum_rotated_rectangle
@@ -400,10 +413,32 @@ class NeuralInputsVisualizer:
 
                 scalars = [area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]
 
-                # Verifiche vincolo neuro-simbolico fisico
-                auto_allowed = (obb_w >= 1.55 and (road_f >= 0.08 or roadside_f >= 0.20) and area >= 5.0)
-                truck_allowed = (obb_w >= 2.15 and (road_f >= 0.12 or roadside_f >= 0.25) and area >= 14.0)
-                vru_allowed = True
+                # Verifiche vincolo neuro-simbolico fisico calibrato
+                auto_allowed = bool(compat_mask[0].item() > 0.5 and obb_w >= 1.55 and area >= 3.5)
+                truck_allowed = bool(compat_mask[1].item() > 0.5 and obb_w >= 2.0 and area >= 8.0)
+                vru_allowed = bool(compat_mask[2].item() > 0.5)
+                barrier_allowed = bool(compat_mask[5].item() > 0.5)
+
+                # Calcolo ritaglio patch 64x64 locale ed inferenza live del modello AttentionPerZoneModel
+                px_x = np.clip(((vis_coords[:, 0] + GRID_RANGE) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
+                px_y = np.clip(((GRID_RANGE - vis_coords[:, 1]) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
+                xmin, xmax = max(0, np.min(px_x) - 2), min(GRID_DIM - 1, np.max(px_x) + 2)
+                ymin, ymax = max(0, np.min(px_y) - 2), min(GRID_DIM - 1, np.max(px_y) + 2)
+
+                probs_vru = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+                if xmax > xmin and ymax > ymin:
+                    try:
+                        channels_single = list(self.channels_11)
+                        channels_single[1] = occ_mask_single
+                        t_single = torch.tensor(np.stack(channels_single, axis=0), dtype=torch.float32)
+                        patch_crop = t_single[:, ymin:ymax+1, xmin:xmax+1]
+                        patch_64 = F.interpolate(patch_crop.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).to(self.device)
+                        with torch.no_grad():
+                            s_t = torch.tensor([scalars], dtype=torch.float32).to(self.device)
+                            m_t = compat_mask.unsqueeze(0).to(self.device)
+                            probs_vru = self.model.forward_vru(patch_64, s_t, occluder_mask=m_t).squeeze(0).cpu().numpy()
+                    except Exception:
+                        pass
 
                 # Punto rappresentativo per etichetta entro 25m
                 c_pt = poly_main.representative_point()
@@ -415,6 +450,7 @@ class NeuralInputsVisualizer:
                     "shapely": poly_main,
                     "center": (cx, cy),
                     "scalars": scalars,
+                    "mask_single": occ_mask_single,
                     "area": area,
                     "dist": dist,
                     "obb_w": obb_w,
@@ -424,9 +460,17 @@ class NeuralInputsVisualizer:
                     "cross_f": cross_f,
                     "roadside_f": roadside_f,
                     "terr_f": terr_f,
+                    "occ_name": occ_name,
+                    "occ_wlh": occ_wlh,
+                    "occ_h": occ_h,
+                    "occ_w": occ_w,
+                    "occ_l": occ_l,
+                    "compat_mask": compat_mask.cpu().numpy(),
                     "auto_allowed": auto_allowed,
                     "truck_allowed": truck_allowed,
-                    "vru_allowed": vru_allowed
+                    "vru_allowed": vru_allowed,
+                    "barrier_allowed": barrier_allowed,
+                    "probs_vru": probs_vru
                 })
 
     def compute_channel_attention(self):
@@ -529,7 +573,7 @@ class NeuralInputsVisualizer:
         self.drawn_occlusions = []
         for z_i, z in enumerate(self.occlusion_zones):
             poly_xy = z["poly_xy"]
-            is_selected = (z_i == self.selected_zone_idx and self.show_auxiliary)
+            is_selected = (z_i == self.selected_zone_idx)
 
             fc = '#FEF08A' if is_selected else '#94A3B8'
             ec = '#B45309' if is_selected else '#475569'
@@ -690,13 +734,26 @@ class NeuralInputsVisualizer:
 
         # Titolo in alto a sinistra
         self.fig.text(0.03, 0.962,
-                      "Figure 6: Rappresentazione Multimodale degli Input (11 Canali BEV & Rete Ausiliaria)",
-                      fontsize=10.5, fontweight='bold', color=c_border, ha='left', va='center')
+                      "Figure 6: Input Multimodali (11 Canali BEV & MLP)",
+                      fontsize=9.8, fontweight='bold', color=c_border, ha='left', va='center')
+
+        # Pulsante Toggle Mostra Frame Completo / Zona Singola (C1)
+        c1_bg = '#0284C7' if self.show_full_c1 else '#F8FAFC'
+        c1_fg = '#FFFFFF' if self.show_full_c1 else '#0F172A'
+        c1_lbl = 'C1 Completo: ON' if self.show_full_c1 else 'C1 Completo'
+        ax_c1_btn = self.fig.add_axes([0.425, 0.942, 0.110, 0.034])
+        btn_c1 = Button(ax_c1_btn, c1_lbl, color=c1_bg,
+                        hovercolor='#0369A1' if self.show_full_c1 else '#E2E8F0')
+        btn_c1.label.set_fontsize(7.8)
+        btn_c1.label.set_fontweight('bold')
+        btn_c1.label.set_color(c1_fg)
+        btn_c1.on_clicked(self.toggle_c1_mode)
+        self.ui_buttons.append((ax_c1_btn, btn_c1))
 
         # Pulsante Toggle Rete Neurale Ausiliaria (Centro-Destra)
         aux_bg = '#4338CA' if self.show_auxiliary else '#F8FAFC'
         aux_fg = '#FFFFFF' if self.show_auxiliary else '#1E293B'
-        aux_lbl = '★ RETE AUSILIARIA (MLP): ON' if self.show_auxiliary else '★ Mostra Rete Ausiliaria (MLP)'
+        aux_lbl = 'Rete Ausiliaria (MLP): ON' if self.show_auxiliary else 'Mostra Rete Ausiliaria (MLP)'
         ax_aux = self.fig.add_axes([0.550, 0.942, 0.205, 0.034])
         btn_aux = Button(ax_aux, aux_lbl, color=aux_bg,
                          hovercolor='#3730A3' if self.show_auxiliary else '#E2E8F0')
@@ -749,8 +806,8 @@ class NeuralInputsVisualizer:
 
         # Footer con scorciatoie da tastiera
         self.fig.text(0.50, 0.015,
-                      "[<- / ->] o [A / D]: Naviga Frame  |  [T / Spazio / M]: Toggle Rete Ausiliaria  |  "
-                      "[Z / X]: Scorri Zone  |  [Click BEV]: Ispeziona Scalari & FiLM  |  [S]: Salva HD",
+                      "[<- / ->] o [A / D]: Naviga Frame  |  [C]: Toggle C1 Frame/Zona  |  [T / Spazio / M]: Rete Ausiliaria  |  "
+                      "[Z / X]: Scorri Zone  |  [Click BEV]: Seleziona Zona & C1  |  [S]: Salva HD",
                       fontsize=8.0, color='#64748B', ha='center', va='center')
 
         self.fig.canvas.draw_idle()
@@ -776,29 +833,47 @@ class NeuralInputsVisualizer:
             meta = CHANNEL_METADATA[i]
             ch_data = self.channels_11[i]
 
-            ax_c.set_facecolor('#0F172A' if i == 0 else '#F8FAFC')
+            # Se canale 1 (Ombre Raycasting): mostra ESATTAMENTE la singola zona d'ombra selezionata o tutte le zone
+            is_c1_single = False
+            if i == 1:
+                if not self.show_full_c1 and self.occlusion_zones and 0 <= self.selected_zone_idx < len(self.occlusion_zones):
+                    act_z = self.occlusion_zones[self.selected_zone_idx]
+                    ch_data = act_z.get("mask_single", self.channels_11[1])
+                    is_c1_single = True
+                else:
+                    ch_data = self.channels_11[1]
+
+            ax_c.set_facecolor('#0F172A' if i == 0 else ('#FEF3C7' if is_c1_single else '#F8FAFC'))
             ax_c.set_xticks([])
             ax_c.set_yticks([])
             for spine in ax_c.spines.values():
-                spine.set_color('#0F172A')
-                spine.set_linewidth(1.0)
+                spine.set_color('#D97706' if is_c1_single else ('#0284C7' if (i == 1 and self.show_full_c1) else '#0F172A'))
+                spine.set_linewidth(1.8 if (is_c1_single or (i == 1 and self.show_full_c1)) else 1.0)
 
             # Visualizza la mappa del canale (rot90 x3 per allineare l'orientamento alle mappe semantiche nuScenes)
             v_max = max(1.0, float(np.max(ch_data)))
             ax_c.imshow(np.rot90(ch_data, 3), extent=extent, cmap=meta["cmap"], vmin=0, vmax=v_max, origin='lower')
 
             # Cerchio tratteggiato limite operativo a 25m
-            c_circle = '#64748B' if i == 0 else '#94A3B8'
+            c_circle = '#64748B' if i == 0 else ('#D97706' if is_c1_single else '#94A3B8')
             circ_25 = Circle((0, 0), self.max_range, color=c_circle, fill=False, linestyle='--', linewidth=0.75, zorder=6)
             ax_c.add_patch(circ_25)
 
             # Indicatore peso attention per canale
             w_se = self.se_weights[i] if i < len(self.se_weights) else 0.5
-            w_col = '#15803D' if w_se >= 0.50 else '#D97706'
 
-            # Titolo pulito con badge attention
-            ax_c.set_title(f"{meta['title']}\nSE Attn: {w_se:.2f}", fontsize=7.2, fontweight='bold',
-                           color='#0F172A', pad=3)
+            # Titolo pulito con badge attention e segnalazione zona per C1
+            if is_c1_single:
+                ch_title = f"C1: Ombra Zona Z{self.selected_zone_idx+1}\nArea: {act_z['area']:.1f} m² | SE: {w_se:.2f}"
+                title_col = '#B45309'
+            elif i == 1:
+                ch_title = f"C1: Ombre Raycasting (Tutte)\nZone: {len(self.occlusion_zones)} | SE: {w_se:.2f}"
+                title_col = '#0369A1'
+            else:
+                ch_title = f"{meta['title']}\nSE Attn: {w_se:.2f}"
+                title_col = '#0F172A'
+
+            ax_c.set_title(ch_title, fontsize=7.2, fontweight='bold', color=title_col, pad=3)
 
             # Cerchio ego al centro
             ax_c.plot(0, 0, marker='o', color='#38BDF8', markersize=2.5, zorder=5)
@@ -833,7 +908,7 @@ class NeuralInputsVisualizer:
 
         # Pannello destro suddiviso in 4 card verticali
         gs_right = GridSpec(4, 1, figure=self.fig, left=0.50, right=0.97, bottom=0.06, top=0.91,
-                            height_ratios=[1.25, 0.85, 1.0, 0.9], hspace=0.30)
+                            height_ratios=[1.20, 0.85, 1.15, 0.95], hspace=0.30)
 
         ax_card1 = self.fig.add_subplot(gs_right[0, 0])
         ax_card2 = self.fig.add_subplot(gs_right[1, 0])
@@ -904,53 +979,91 @@ class NeuralInputsVisualizer:
         # =====================================================================
         # CARD 2: ARCHITETTURA RETE AUSILIARIA MLP (9 -> 64 -> 128)
         # =====================================================================
-        ax_card2.set_facecolor('#FFFFFF')
+        ax_card2.set_facecolor('#F8FAFC')
         for spine in ax_card2.spines.values():
             spine.set_color(c_border); spine.set_linewidth(1.0)
         ax_card2.set_xlim(0, 1); ax_card2.set_ylim(0, 1)
         ax_card2.set_xticks([]); ax_card2.set_yticks([])
 
-        ax_card2.text(0.025, 0.82, "2. RETE AUSILIARIA MLP: Linear(9, 64) -> LayerNorm -> ReLU -> Linear(64, 128) -> LayerNorm -> ReLU",
-                      fontsize=7.8, fontweight='bold', color='#4338CA', va='center')
+        ax_card2.text(0.025, 0.82, "2. RETE AUSILIARIA MLP: Embedding Semantico dei 9 Scalari Fisici (ℝ⁹ → ℝ¹²⁸)",
+                      fontsize=8.0, fontweight='bold', color='#4338CA', va='center')
 
-        l2_norm = float(np.linalg.norm(sc_feat_np))
+        n_act = int(np.sum(sc_feat_np > 0))
+        pct_act = (n_act / 128.0) * 100.0
         mean_act = float(np.mean(sc_feat_np))
         max_act = float(np.max(sc_feat_np))
+        l2_norm = float(np.linalg.norm(sc_feat_np))
 
-        stats_mlp = (f"Vettore Ausiliario: sc_feat ∈ ℝ¹²⁸   |   "
-                     f"Norma L2: {l2_norm:.2f}   |   Attivazione Media: {mean_act:.2f}   |   Max: {max_act:.2f}")
-        ax_card2.text(0.025, 0.54, stats_mlp, fontsize=7.6, color='#1E293B', va='center')
+        ax_card2.text(0.025, 0.58,
+                      "• Ruolo: Converte la fisica 3D (area, occlusore, mappa HD) in un vettore semantico per guidare la visione artificiale.",
+                      fontsize=7.3, color='#334155', va='center')
 
-        # Visualizzazione spettrogramma 1D delle 128 feature estratte dall'MLP
-        ax_feat = ax_card2.inset_axes([0.025, 0.12, 0.95, 0.28])
-        ax_feat.imshow(sc_feat_np.reshape(1, 128), aspect='auto', cmap='magma', origin='upper')
-        ax_feat.set_xticks([]); ax_feat.set_yticks([])
+        stats_mlp = (f"• Spazio Latente sc_feat ∈ ℝ¹²⁸: {n_act}/128 neuroni attivi ({pct_act:.0f}%)  |  "
+                     f"Media: {mean_act:.2f}  |  Max: {max_act:.2f}  |  Norma L2: {l2_norm:.2f}")
+        ax_card2.text(0.025, 0.36, stats_mlp, fontsize=7.2, fontweight='bold', color='#1E293B', va='center')
+
+        # Inset per la mappa termica dei 128 neuroni latenti
+        ax_feat = ax_card2.inset_axes([0.025, 0.08, 0.95, 0.18])
+        ax_feat.imshow(sc_feat_np.reshape(1, 128), aspect='auto', cmap='viridis', origin='upper', vmin=0, vmax=max(1.0, max_act))
+        ax_feat.set_xticks([0, 31, 63, 95, 127])
+        ax_feat.set_xticklabels(['#0', '#31', '#63', '#95', '#127'], fontsize=6.2, color='#475569')
+        ax_feat.set_yticks([])
         for sp in ax_feat.spines.values():
             sp.set_color(c_border); sp.set_linewidth(0.8)
 
         # =====================================================================
         # CARD 3: MODULAZIONE MULTIMODALE FiLM (GAMMA & BETA)
         # =====================================================================
-        ax_card3.set_facecolor('#F8FAFC')
+        ax_card3.set_facecolor('#FFFFFF')
         for spine in ax_card3.spines.values():
             spine.set_color(c_border); spine.set_linewidth(1.0)
-        ax_card3.spines['top'].set_visible(False)
-        ax_card3.spines['right'].set_visible(False)
+        ax_card3.set_xlim(0, 1); ax_card3.set_ylim(0, 1)
+        ax_card3.set_xticks([]); ax_card3.set_yticks([])
 
-        ax_card3.set_title("3. MODULAZIONE AFFINE FiLM: Linear(128, 256) → [γ_moltiplicativo, β_additivo]",
-                           fontsize=8.0, fontweight='bold', color='#1E293B', pad=4, loc='left')
+        scale_eff = 1.0 + np.tanh(gamma_np)  # Fattore di scala moltiplicativo effettivo in (0, 2)
+        n_amp = int(np.sum(scale_eff >= 1.0))
+        n_att = int(np.sum(scale_eff < 1.0))
+        mean_beta = float(np.mean(beta_np))
 
-        # Istogramma comparativo dei coefficienti FiLM
-        bins = np.linspace(-2.0, 2.0, 30)
-        ax_card3.hist(gamma_np, bins=bins, alpha=0.65, color='#2563EB', label=f'γ (Fattore Scala, μ={gamma_np.mean():.2f})', edgecolor='#1D4ED8')
-        ax_card3.hist(beta_np, bins=bins, alpha=0.65, color='#DC2626', label=f'β (Shift Additivo, μ={beta_np.mean():.2f})', edgecolor='#B91C1C')
-        ax_card3.axvline(0.0, color='#64748B', linestyle='--', linewidth=0.8)
-        ax_card3.legend(loc='upper right', fontsize=7.2, frameon=True, facecolor='#FFFFFF', edgecolor='#CBD5E1')
-        ax_card3.set_xlim(-2.0, 2.0)
-        ax_card3.tick_params(axis='both', which='major', labelsize=6.8)
+        ax_card3.text(0.025, 0.88,
+                      "3. MODULAZIONE AFFINE FiLM: Condizionamento dei 128 Canali Visivi CNN",
+                      fontsize=8.0, fontweight='bold', color='#1E293B', va='center')
+        ax_card3.text(0.025, 0.76,
+                      r"Formula:  $F_{modulato} = F_{visivo} \cdot (1 + \tanh(\gamma)) + \beta$   "
+                      f"[Effetto: {n_amp} canali potenziati, {n_att} canali attenuati]",
+                      fontsize=7.3, color='#475569', va='center')
+
+        # Inset Sinistro: Barplot dei fattori di scala s = 1 + tanh(gamma) per i 128 canali visivi
+        ax_scale = ax_card3.inset_axes([0.025, 0.12, 0.58, 0.52])
+        colors_s = ['#16A34A' if s >= 1.0 else '#DC2626' for s in scale_eff]
+        ch_idx = np.arange(128)
+        ax_scale.bar(ch_idx, scale_eff, width=0.9, color=colors_s, edgecolor='none', alpha=0.9)
+        ax_scale.axhline(1.0, color='#0F172A', linestyle='--', linewidth=0.9, label='Neutro (s=1.0)')
+        ax_scale.set_xlim(-1, 128)
+        ax_scale.set_ylim(0.0, 2.05)
+        ax_scale.set_yticks([0.0, 1.0, 2.0])
+        ax_scale.set_yticklabels(['0x', '1x', '2x'], fontsize=6.5, color='#334155')
+        ax_scale.set_xticks([0, 32, 64, 96, 127])
+        ax_scale.set_xticklabels(['Ch 0', 'Ch 32', 'Ch 64', 'Ch 96', 'Ch 127'], fontsize=6.2, color='#475569')
+        ax_scale.set_title("Fattore di Scala Moltiplicativo (s) per Canale CNN", fontsize=6.8, fontweight='bold', color='#1E293B', pad=2)
+        for sp in ax_scale.spines.values():
+            sp.set_color('#94A3B8'); sp.set_linewidth(0.8)
+
+        # Inset Destro: Distribuzione Shift Additivo Beta
+        ax_beta = ax_card3.inset_axes([0.66, 0.12, 0.315, 0.52])
+        bins_b = np.linspace(-1.5, 1.5, 16)
+        ax_beta.hist(beta_np, bins=bins_b, color='#2563EB', alpha=0.75, edgecolor='#1D4ED8')
+        ax_beta.axvline(0.0, color='#0F172A', linestyle='--', linewidth=0.8)
+        ax_beta.set_xlim(-1.5, 1.5)
+        ax_beta.set_xticks([-1.0, 0.0, 1.0])
+        ax_beta.set_xticklabels(['-1', '0', '+1'], fontsize=6.2, color='#475569')
+        ax_beta.tick_params(axis='y', labelsize=6.2)
+        ax_beta.set_title(f"Shift Additivo β (μ={mean_beta:+.2f})", fontsize=6.8, fontweight='bold', color='#1E293B', pad=2)
+        for sp in ax_beta.spines.values():
+            sp.set_color('#94A3B8'); sp.set_linewidth(0.8)
 
         # =====================================================================
-        # CARD 4: VINCOLO NEURO-SIMBOLICO & AMMISSIBILITÀ FISICA
+        # CARD 4: VINCOLO NEURO-SIMBOLICO & INFERENZA ATTENTION-PER-ZONE
         # =====================================================================
         ax_card4.set_facecolor('#FFFFFF')
         for spine in ax_card4.spines.values():
@@ -958,35 +1071,70 @@ class NeuralInputsVisualizer:
         ax_card4.set_xlim(0, 1); ax_card4.set_ylim(0, 1)
         ax_card4.set_xticks([]); ax_card4.set_yticks([])
 
-        ax_card4.text(0.025, 0.85, "4. VINCOLO NEURO-SIMBOLICO INTEGRATO (AFFORDANCE GATING)",
-                      fontsize=8.0, fontweight='bold', color='#1E293B', va='center')
+        # Intestazione con info occludente
+        occ_name_str = active_zone.get("occ_name", "N/D")
+        occ_wlh = active_zone.get("occ_wlh", None)
+        if occ_wlh is not None and len(occ_wlh) >= 3:
+            w_m, l_m, h_m = occ_wlh[0], occ_wlh[1], occ_wlh[2]
+            occ_dim_str = f"{w_m:.2f}m x {l_m:.2f}m x {h_m:.2f}m"
+            h_tag = " [H ≥ 1.50m]" if h_m >= 1.50 else " [H < 1.50m]"
+        else:
+            occ_dim_str = "Dimensioni non disponibili"
+            h_tag = ""
 
-        # Stato delle 3 classi chiave
+        ax_card4.text(0.025, 0.90, f"4. VINCOLO NEURO-SIMBOLICO & INFERENZA MODELLO (ZONA Z{z_idx+1})",
+                      fontsize=8.0, fontweight='bold', color='#1E293B', va='center')
+        ax_card4.text(0.025, 0.77, f"• Occludente: {occ_name_str} ({occ_dim_str}){h_tag}",
+                      fontsize=7.3, color='#475569', fontweight='bold', va='center')
+
+        # Dati delle 4 classi con stato simbolico, regola e probabilità predetta live
+        probs = active_zone.get("probs_vru", [0.0, 0.0, 0.0, 0.0])
         classes_gating = [
-            ("Auto / Van", active_zone["auto_allowed"], "Varco ≥ 1.7m & Asfalto ≥ 15%"),
-            ("Camion / Bus", active_zone["truck_allowed"], "Varco ≥ 2.3m & Asfalto ≥ 15%"),
-            ("VRU (Pedoni/Ciclisti)", active_zone["vru_allowed"], "Ammesso ovunque (Marciapiede / Strisce / Varchi stretti)")
+            ("Auto / Van", active_zone.get("auto_allowed", True), "Varco OBB ≥ 1.55m, Area ≥ 3.5m²", probs[0]),
+            ("Camion / Bus", active_zone.get("truck_allowed", False), "Occludente h ≥ 1.50m, Area ≥ 8.0m²", probs[1]),
+            ("VRU (Pedoni/Ciclisti)", active_zone.get("vru_allowed", True), "Prior universale su marciapiedi/strisce", probs[2]),
+            ("Barriere / Muri", active_zone.get("barrier_allowed", True), "Prossimità bordo strada e strutture", probs[3]),
         ]
 
-        for i, (c_name, is_ok, rule_str) in enumerate(classes_gating):
-            y_r = 0.58 - i * 0.24
+        for i, (c_name, is_ok, rule_str, p_val) in enumerate(classes_gating):
+            y_r = 0.57 - i * 0.165
             badge_c = '#15803D' if is_ok else '#DC2626'
             badge_bg = '#DCFCE7' if is_ok else '#FEE2E2'
-            status_txt = "[OK] AMMESSO" if is_ok else "[NO] INIBITO"
+            status_txt = "AMMESSO" if is_ok else "INIBITO"
 
-            ax_card4.add_patch(FancyBboxPatch((0.025, y_r - 0.04), 0.22, 0.18,
-                                              boxstyle="round,pad=0.015,rounding_size=0.02",
-                                              facecolor=badge_bg, edgecolor=badge_c, linewidth=0.9))
+            # Nome classe allineato a sinistra
+            ax_card4.text(0.025, y_r + 0.028, c_name,
+                          fontsize=7.2, fontweight='bold', color='#1E293B', va='center')
 
-            ax_card4.text(0.135, y_r + 0.05, f"{c_name}: {status_txt}",
-                          fontsize=7.2, fontweight='bold', color=badge_c, ha='center', va='center')
+            # Badge Stato Simbolico compatto
+            ax_card4.add_patch(FancyBboxPatch((0.170, y_r - 0.035), 0.105, 0.125,
+                                              boxstyle="round,pad=0.012,rounding_size=0.018",
+                                              facecolor=badge_bg, edgecolor=badge_c, linewidth=0.8))
+            ax_card4.text(0.222, y_r + 0.028, status_txt,
+                          fontsize=6.8, fontweight='bold', color=badge_c, ha='center', va='center')
 
-            ax_card4.text(0.270, y_r + 0.05, f"Regola: {rule_str}",
-                          fontsize=7.2, color='#475569', va='center')
+            # Testo Regola Simbolica
+            ax_card4.text(0.290, y_r + 0.028, f"Regola: {rule_str}",
+                          fontsize=6.8, color='#475569', va='center')
+
+            # Probabilità Neurale Live (P: xx.x%)
+            p_pct = float(p_val) * 100.0
+            p_col = '#15803D' if p_pct >= 30.0 else ('#DC2626' if p_pct < 5.0 else '#2563EB')
+            p_bg = '#F0FDF4' if p_pct >= 30.0 else '#F8FAFC'
+            ax_card4.add_patch(FancyBboxPatch((0.790, y_r - 0.035), 0.185, 0.125,
+                                              boxstyle="round,pad=0.012,rounding_size=0.018",
+                                              facecolor=p_bg, edgecolor='#CBD5E1', linewidth=0.8))
+            ax_card4.text(0.882, y_r + 0.028, f"Predizione AI: {p_pct:.1f}%",
+                          fontsize=7.1, fontweight='bold', color=p_col, ha='center', va='center')
 
     def toggle_auxiliary(self, event=None):
         """Attiva o disattiva la visualizzazione della rete ausiliaria."""
         self.show_auxiliary = not self.show_auxiliary
+        self.render()
+
+    def toggle_c1_mode(self, event=None):
+        """Alterna tra visualizzazione della singola zona d'ombra selezionata e tutte le zone nel canale C1."""
+        self.show_full_c1 = not self.show_full_c1
         self.render()
 
     def cycle_zone(self, delta):
@@ -995,8 +1143,6 @@ class NeuralInputsVisualizer:
             return
         n_zones = len(self.occlusion_zones)
         self.selected_zone_idx = (self.selected_zone_idx + delta) % n_zones
-        if not self.show_auxiliary:
-            self.show_auxiliary = True
         self.render()
 
     def on_key(self, event):
@@ -1009,6 +1155,8 @@ class NeuralInputsVisualizer:
             self.cycle_zone(-1)
         elif event.key in ['x', 'X', 'down']:
             self.cycle_zone(1)
+        elif event.key in ['c', 'C']:
+            self.toggle_c1_mode()
         elif event.key in ['space', 't', 'T', 'm', 'M']:
             self.toggle_auxiliary()
         elif event.key in ['s', 'S']:
@@ -1031,19 +1179,17 @@ class NeuralInputsVisualizer:
             pass
 
     def on_mouse_click(self, event):
-        """Seleziona una zona d'ombra con il click del mouse."""
+        """Seleziona una zona d'ombra con il click del mouse (focalizza C1 sulla zona selezionata senza forzare la rete ausiliaria)."""
         if event.inaxes != self.ax_map:
             return
         x, y = event.xdata, event.ydata
         if x is None or y is None:
             return
-        pt = Point(x, y)
 
         for i, item in enumerate(self.drawn_occlusions):
             if item['path'].contains_point((x, y)):
                 self.selected_zone_idx = i
-                if not self.show_auxiliary:
-                    self.show_auxiliary = True
+                self.show_full_c1 = False
                 self.render()
                 break
 
@@ -1064,13 +1210,15 @@ class NeuralInputsVisualizer:
             if item['path'].contains_point((x, y)):
                 z = item['meta']
                 z_i = z['idx']
+                occ_h_txt = f"{z['occ_h']:.2f}m" if z.get('occ_h') is not None else "N/D"
                 tt_text = (
                     f"ZONA D'OMBRA Z{z_i+1}\n"
+                    f"• Occludente: {z.get('occ_name', 'N/D')} (h={occ_h_txt})\n"
                     f"• Area: {z['area']:.1f} m²  |  Distanza: {z['dist']:.1f} m\n"
                     f"• Varco OBB: {z['obb_w']:.2f}m x {z['obb_l']:.2f}m\n"
                     f"• Asfalto: {int(z['road_f']*100)}%  |  Marciapiede: {int(z['side_f']*100)}%\n"
-                    f"• Auto Ammessa: {'Sì' if z['auto_allowed'] else 'No'}  |  Camion: {'Sì' if z['truck_allowed'] else 'No'}\n"
-                    f"[Click per aprire Rete Ausiliaria]"
+                    f"• Auto: {'Sì' if z['auto_allowed'] else 'No'}  |  Camion: {'Sì' if z['truck_allowed'] else 'No'}  |  VRU: Sì\n"
+                    f"[Click: Seleziona Zona & Aggiorna C1]"
                 )
                 self.tooltip.xy = (x, y)
                 self.tooltip.set_position((15, 15))
