@@ -42,7 +42,8 @@ from raycaster.ray_caster import RayCaster
 from ground_truth.ground_truth_extractor import (
     extract_ground_truth_masks,
     rasterize_polygon,
-    get_occlusion_ground_truth_target
+    get_occlusion_ground_truth_target,
+    clean_occlusion_polygon
 )
 from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
 
@@ -86,6 +87,7 @@ class NeuralInputsVisualizer:
 
         self.max_range = float(max_range)
         self.show_auxiliary = bool(initial_aux)
+        self.show_global_view = False
         self.show_full_c1 = False
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"• Dispositivo di Calcolo: {self.device}")
@@ -237,20 +239,29 @@ class NeuralInputsVisualizer:
         log_rec = self.adapter.nusc.get('log', sc_rec['log_token'])
         self.location = log_rec['location']
 
-        # 1. Estrazione degli 11 canali completi della scena BEV (11, 200, 200)
-        self.extract_11_channels()
-
-        # 2. Estrazione e calcolo delle zone d'ombra con i 9 scalari
-        self.extract_occlusion_zones()
-
-        # 3. Rileva pseudo-box statici (muri/edifici) con il clustering geometrico di ray_caster.py
+        # 1. Rileva pseudo-box statici (muri/edifici) con il clustering geometrico di ray_caster.py
         try:
             rc = RayCaster(self.frame_data, verbose=False)
             self.static_boxes = rc.detect_static_manmade_boxes(self.frame_data.get('boxes', []))
         except Exception:
             self.static_boxes = []
 
-        # 4. Calcolo Pesi Channel Attention (Squeeze-and-Excitation) globali
+        # 2. Estrazione degli 11 canali completi della scena BEV (11, 200, 200)
+        self.extract_11_channels()
+
+        # 3. Estrazione e calcolo delle zone d'ombra con i 9 scalari (pulite geometricamente)
+        self.extract_occlusion_zones()
+
+        # 4. Sincronizzazione rigorosa di C1 con le zone d'ombra pulite
+        if hasattr(self, 'occlusion_zones') and len(self.occlusion_zones) > 0:
+            c1_clean = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
+            for z in self.occlusion_zones:
+                c1_clean = np.maximum(c1_clean, z["mask_single"])
+            self.occlusion_mask = c1_clean
+            self.channels_11[1] = self.occlusion_mask
+            self.input_tensor = torch.tensor(np.stack(self.channels_11, axis=0), dtype=torch.float32)
+
+        # 5. Calcolo Pesi Channel Attention (Squeeze-and-Excitation) globali
         self.compute_channel_attention()
 
         self.render()
@@ -275,11 +286,12 @@ class NeuralInputsVisualizer:
                     self.lidar_bev[py, px] = 1.0
         self.lidar_bev = self.lidar_bev * mask_25m
 
-        # 2. Canale 1: Ombre Raycasting (Maschera cumulativa entro 25m)
+        # 2. Canale 1: Ombre Raycasting (Maschera cumulativa entro 25m pulita geometricamente)
         self.occlusion_mask = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
         token = self.frame_data.get("sample_token", "")
         json_path = os.path.join(ROOT_DIR, "extracted_occlusions", f"{token}.json")
         circle_25m = Point(0, 0).buffer(self.max_range)
+        boxes_by_token = {b.token: b for b in self.frame_data.get('boxes', [])}
 
         if os.path.exists(json_path):
             with open(json_path, "r") as f:
@@ -293,8 +305,15 @@ class NeuralInputsVisualizer:
                             sp = sp.buffer(0)
                         sp_25 = sp.intersection(circle_25m)
                         if not sp_25.is_empty and sp_25.area >= 0.1:
-                            sub_polys = list(sp_25.geoms) if sp_25.geom_type == 'MultiPolygon' else [sp_25]
-                            for p_sub in sub_polys:
+                            b_obj = boxes_by_token.get(occ.get("object_token"))
+                            clean_polys = clean_occlusion_polygon(
+                                sp_25,
+                                occluder_box=b_obj,
+                                static_boxes=getattr(self, 'static_boxes', []),
+                                min_area=0.25,
+                                min_width=0.30
+                            )
+                            for p_sub in clean_polys:
                                 coords = np.array(p_sub.exterior.coords)[:-1]
                                 mask = rasterize_polygon(coords)
                                 self.occlusion_mask = np.maximum(self.occlusion_mask, mask)
@@ -309,8 +328,15 @@ class NeuralInputsVisualizer:
                         sp = sp.buffer(0)
                     sp_25 = sp.intersection(circle_25m)
                     if not sp_25.is_empty and sp_25.area >= 0.1:
-                        sub_polys = list(sp_25.geoms) if sp_25.geom_type == 'MultiPolygon' else [sp_25]
-                        for p_sub in sub_polys:
+                        b_obj = boxes_by_token.get(poly.get("object_token"))
+                        clean_polys = clean_occlusion_polygon(
+                            sp_25,
+                            occluder_box=b_obj,
+                            static_boxes=getattr(self, 'static_boxes', []),
+                            min_area=0.25,
+                            min_width=0.30
+                        )
+                        for p_sub in clean_polys:
                             coords = np.array(p_sub.exterior.coords)[:-1]
                             mask = rasterize_polygon(coords)
                             self.occlusion_mask = np.maximum(self.occlusion_mask, mask)
@@ -384,10 +410,14 @@ class NeuralInputsVisualizer:
 
             compat_mask = AttentionPerZoneModel.build_compatibility_mask(occ_name, occ_wlh, device=self.device)
 
-            sub_geoms = list(poly_vis.geoms) if poly_vis.geom_type == 'MultiPolygon' else [poly_vis]
-            for poly_main in sub_geoms:
-                if poly_main.area < 0.1:
-                    continue
+            clean_polys = clean_occlusion_polygon(
+                poly_vis,
+                occluder_box=b_obj,
+                static_boxes=getattr(self, 'static_boxes', []),
+                min_area=0.25,
+                min_width=0.30
+            )
+            for poly_main in clean_polys:
 
                 vis_coords = np.array(poly_main.exterior.coords)[:-1]
                 if len(vis_coords) < 3:
@@ -414,17 +444,28 @@ class NeuralInputsVisualizer:
                 scalars = [area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]
 
                 # Verifiche vincolo neuro-simbolico fisico calibrato
+                compat_mask = AttentionPerZoneModel.build_compatibility_mask(
+                    occ_name, occ_wlh, road_f=road_f, roadside_f=roadside_f, device=self.device
+                )
                 auto_allowed = bool(compat_mask[0].item() > 0.5 and obb_w >= 1.55 and area >= 3.5)
                 truck_allowed = bool(compat_mask[1].item() > 0.5 and obb_w >= 2.0 and area >= 8.0)
                 vru_allowed = bool(compat_mask[2].item() > 0.5)
                 barrier_allowed = bool(compat_mask[5].item() > 0.5)
 
                 # Calcolo ritaglio patch 64x64 locale ed inferenza live del modello AttentionPerZoneModel
-                px_x = np.clip(((vis_coords[:, 0] + GRID_RANGE) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
-                px_y = np.clip(((GRID_RANGE - vis_coords[:, 1]) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
-                xmin, xmax = max(0, np.min(px_x) - 2), min(GRID_DIM - 1, np.max(px_x) + 2)
-                ymin, ymax = max(0, np.min(px_y) - 2), min(GRID_DIM - 1, np.max(px_y) + 2)
+                # Il bounding box viene estratto direttamente dai pixel della maschera d'ombra rasterizzata
+                rows, cols = np.where(occ_mask_single > 0)
+                if len(rows) > 0 and len(cols) > 0:
+                    ymin, ymax = max(0, int(np.min(rows)) - 2), min(GRID_DIM - 1, int(np.max(rows)) + 2)
+                    xmin, xmax = max(0, int(np.min(cols)) - 2), min(GRID_DIM - 1, int(np.max(cols)) + 2)
+                else:
+                    px_x = np.clip(((vis_coords[:, 0] + GRID_RANGE) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
+                    px_y = np.clip(((GRID_RANGE - vis_coords[:, 1]) / VOXEL_SIZE).astype(int), 0, GRID_DIM - 1)
+                    xmin, xmax = max(0, np.min(px_x) - 2), min(GRID_DIM - 1, np.max(px_x) + 2)
+                    ymin, ymax = max(0, np.min(px_y) - 2), min(GRID_DIM - 1, np.max(px_y) + 2)
 
+                patch_64_np = None
+                se_weights_z = None
                 probs_vru = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
                 if xmax > xmin and ymax > ymin:
                     try:
@@ -433,10 +474,17 @@ class NeuralInputsVisualizer:
                         t_single = torch.tensor(np.stack(channels_single, axis=0), dtype=torch.float32)
                         patch_crop = t_single[:, ymin:ymax+1, xmin:xmax+1]
                         patch_64 = F.interpolate(patch_crop.unsqueeze(0), size=(64, 64), mode='bilinear', align_corners=False).to(self.device)
+                        patch_64_np = patch_64.squeeze(0).cpu().numpy()
                         with torch.no_grad():
                             s_t = torch.tensor([scalars], dtype=torch.float32).to(self.device)
                             m_t = compat_mask.unsqueeze(0).to(self.device)
                             probs_vru = self.model.forward_vru(patch_64, s_t, occluder_mask=m_t).squeeze(0).cpu().numpy()
+
+                            # Calcolo dei pesi Channel Attention (SE) specifici per la patch di questa zona
+                            b_z, c_z, _, _ = patch_64.shape
+                            y_z = patch_64.view(b_z, c_z, -1).mean(dim=2)
+                            y_relu_z = torch.relu(self.model.input_se.fc1(y_z))
+                            se_weights_z = torch.sigmoid(self.model.input_se.fc2(y_relu_z)).squeeze().cpu().numpy()
                     except Exception:
                         pass
 
@@ -451,6 +499,8 @@ class NeuralInputsVisualizer:
                     "center": (cx, cy),
                     "scalars": scalars,
                     "mask_single": occ_mask_single,
+                    "patch_64": patch_64_np,
+                    "se_weights": se_weights_z,
                     "area": area,
                     "dist": dist,
                     "obb_w": obb_w,
@@ -737,17 +787,15 @@ class NeuralInputsVisualizer:
                       "Figure 6: Input Multimodali (11 Canali BEV & MLP)",
                       fontsize=9.8, fontweight='bold', color=c_border, ha='left', va='center')
 
-        # Pulsante Toggle Mostra Frame Completo / Zona Singola (C1)
-        c1_bg = '#0284C7' if self.show_full_c1 else '#F8FAFC'
-        c1_fg = '#FFFFFF' if self.show_full_c1 else '#0F172A'
-        c1_lbl = 'C1 Completo: ON' if self.show_full_c1 else 'C1 Completo'
-        ax_c1_btn = self.fig.add_axes([0.425, 0.942, 0.110, 0.034])
-        btn_c1 = Button(ax_c1_btn, c1_lbl, color=c1_bg,
-                        hovercolor='#0369A1' if self.show_full_c1 else '#E2E8F0')
-        btn_c1.label.set_fontsize(7.8)
+        # Pulsante Toggle Vista Globale (25m) vs Vista Patch Zona (64x64)
+        btn_bg = '#0284C7' if self.show_global_view else '#1D4ED8'
+        btn_lbl = 'Vista: Globale (25m)' if self.show_global_view else 'Vista: Patch 64x64'
+        ax_c1_btn = self.fig.add_axes([0.415, 0.942, 0.125, 0.034])
+        btn_c1 = Button(ax_c1_btn, btn_lbl, color=btn_bg, hovercolor='#0369A1')
+        btn_c1.label.set_fontsize(7.5)
         btn_c1.label.set_fontweight('bold')
-        btn_c1.label.set_color(c1_fg)
-        btn_c1.on_clicked(self.toggle_c1_mode)
+        btn_c1.label.set_color('#FFFFFF')
+        btn_c1.on_clicked(self.toggle_global_view)
         self.ui_buttons.append((ax_c1_btn, btn_c1))
 
         # Pulsante Toggle Rete Neurale Ausiliaria (Centro-Destra)
@@ -806,8 +854,8 @@ class NeuralInputsVisualizer:
 
         # Footer con scorciatoie da tastiera
         self.fig.text(0.50, 0.015,
-                      "[<- / ->] o [A / D]: Naviga Frame  |  [C]: Toggle C1 Frame/Zona  |  [T / Spazio / M]: Rete Ausiliaria  |  "
-                      "[Z / X]: Scorri Zone  |  [Click BEV]: Seleziona Zona & C1  |  [S]: Salva HD",
+                      "[<- / ->] o [A / D]: Naviga Frame  |  [C]: Toggle Vista Globale / Patch Zona  |  [T / Spazio / M]: Rete Ausiliaria  |  "
+                      "[Z / X]: Scorri Zone  |  [Click BEV]: Seleziona Zona (Patch 64x64)  |  [S]: Salva HD",
                       fontsize=8.0, color='#64748B', ha='center', va='center')
 
         self.fig.canvas.draw_idle()
@@ -824,59 +872,59 @@ class NeuralInputsVisualizer:
         gs_grid = GridSpec(3, 4, figure=self.fig, left=0.50, right=0.97, bottom=0.06, top=0.91,
                            wspace=0.18, hspace=0.28)
 
-        extent = [-GRID_RANGE, GRID_RANGE, -GRID_RANGE, GRID_RANGE]
+        # Verifica se visualizzare la patch locale 64x64 della zona selezionata o la mappa globale
+        has_active_zone = (not self.show_global_view and self.occlusion_zones and 0 <= self.selected_zone_idx < len(self.occlusion_zones))
+        act_z = self.occlusion_zones[self.selected_zone_idx] if has_active_zone else None
+        is_local = (has_active_zone and act_z is not None and act_z.get("patch_64") is not None)
+
+        extent_global = [-GRID_RANGE, GRID_RANGE, -GRID_RANGE, GRID_RANGE]
+        extent_local = [0, 64, 0, 64]
 
         for i in range(11):
             row = i // 4
             col = i % 4
             ax_c = self.fig.add_subplot(gs_grid[row, col])
             meta = CHANNEL_METADATA[i]
-            ch_data = self.channels_11[i]
 
-            # Se canale 1 (Ombre Raycasting): mostra ESATTAMENTE la singola zona d'ombra selezionata o tutte le zone
-            is_c1_single = False
-            if i == 1:
-                if not self.show_full_c1 and self.occlusion_zones and 0 <= self.selected_zone_idx < len(self.occlusion_zones):
-                    act_z = self.occlusion_zones[self.selected_zone_idx]
-                    ch_data = act_z.get("mask_single", self.channels_11[1])
-                    is_c1_single = True
-                else:
-                    ch_data = self.channels_11[1]
+            if is_local:
+                ch_data = act_z["patch_64"][i]
+                w_se = act_z["se_weights"][i] if act_z.get("se_weights") is not None else 0.5
+                cur_extent = extent_local
+            else:
+                ch_data = self.channels_11[i]
+                w_se = self.se_weights[i] if i < len(self.se_weights) else 0.5
+                cur_extent = extent_global
 
-            ax_c.set_facecolor('#0F172A' if i == 0 else ('#FEF3C7' if is_c1_single else '#F8FAFC'))
+            ax_c.set_facecolor('#0F172A' if i == 0 else ('#EFF6FF' if is_local else '#F8FAFC'))
             ax_c.set_xticks([])
             ax_c.set_yticks([])
             for spine in ax_c.spines.values():
-                spine.set_color('#D97706' if is_c1_single else ('#0284C7' if (i == 1 and self.show_full_c1) else '#0F172A'))
-                spine.set_linewidth(1.8 if (is_c1_single or (i == 1 and self.show_full_c1)) else 1.0)
+                spine.set_color('#1D4ED8' if is_local else '#0F172A')
+                spine.set_linewidth(1.6 if is_local else 1.0)
 
-            # Visualizza la mappa del canale (rot90 x3 per allineare l'orientamento alle mappe semantiche nuScenes)
+            # Visualizza la mappa del canale
             v_max = max(1.0, float(np.max(ch_data)))
-            ax_c.imshow(np.rot90(ch_data, 3), extent=extent, cmap=meta["cmap"], vmin=0, vmax=v_max, origin='lower')
+            ax_c.imshow(np.rot90(ch_data, 3), extent=cur_extent, cmap=meta["cmap"], vmin=0, vmax=v_max, origin='lower')
 
-            # Cerchio tratteggiato limite operativo a 25m
-            c_circle = '#64748B' if i == 0 else ('#D97706' if is_c1_single else '#94A3B8')
-            circ_25 = Circle((0, 0), self.max_range, color=c_circle, fill=False, linestyle='--', linewidth=0.75, zorder=6)
-            ax_c.add_patch(circ_25)
+            if not is_local:
+                # Cerchio tratteggiato limite operativo a 25m
+                circ_25 = Circle((0, 0), self.max_range, color='#94A3B8', fill=False, linestyle='--', linewidth=0.75, zorder=6)
+                ax_c.add_patch(circ_25)
+                # Cerchio ego al centro
+                ax_c.plot(0, 0, marker='o', color='#38BDF8', markersize=2.5, zorder=5)
 
-            # Indicatore peso attention per canale
-            w_se = self.se_weights[i] if i < len(self.se_weights) else 0.5
-
-            # Titolo pulito con badge attention e segnalazione zona per C1
-            if is_c1_single:
-                ch_title = f"C1: Ombra Zona Z{self.selected_zone_idx+1}\nArea: {act_z['area']:.1f} m² | SE: {w_se:.2f}"
-                title_col = '#B45309'
-            elif i == 1:
-                ch_title = f"C1: Ombre Raycasting (Tutte)\nZone: {len(self.occlusion_zones)} | SE: {w_se:.2f}"
-                title_col = '#0369A1'
+            # Titolo pulito con badge attention e segnalazione modalità
+            if is_local:
+                parts = meta['title'].split(':')
+                tag = parts[0].strip()
+                name = parts[1].strip() if len(parts) > 1 else ""
+                ch_title = f"{tag}: {name} [Z{self.selected_zone_idx+1}]\nPatch 64x64 | SE: {w_se:.2f}"
+                title_col = '#1D4ED8'
             else:
-                ch_title = f"{meta['title']}\nSE Attn: {w_se:.2f}"
+                ch_title = f"{meta['title']}\nGlobale 25m | SE: {w_se:.2f}"
                 title_col = '#0F172A'
 
-            ax_c.set_title(ch_title, fontsize=7.2, fontweight='bold', color=title_col, pad=3)
-
-            # Cerchio ego al centro
-            ax_c.plot(0, 0, marker='o', color='#38BDF8', markersize=2.5, zorder=5)
+            ax_c.set_title(ch_title, fontsize=7.1, fontweight='bold', color=title_col, pad=3)
 
         # 12esimo slot: Grafico a barre dei pesi Channel Attention (Squeeze-and-Excitation)
         ax_attn = self.fig.add_subplot(gs_grid[2, 3])
@@ -887,15 +935,17 @@ class NeuralInputsVisualizer:
             ax_attn.spines[spine].set_color('#0F172A')
             ax_attn.spines[spine].set_linewidth(0.9)
 
+        curr_se = act_z["se_weights"] if is_local else self.se_weights
         y_pos = np.arange(11)
-        colors = ['#1D4ED8' if w >= 0.50 else '#94A3B8' for w in self.se_weights]
-        ax_attn.barh(y_pos, self.se_weights[::-1], color=colors[::-1], height=0.75, edgecolor='#0F172A', linewidth=0.6)
+        colors = ['#1D4ED8' if w >= 0.50 else '#94A3B8' for w in curr_se]
+        ax_attn.barh(y_pos, curr_se[::-1], color=colors[::-1], height=0.75, edgecolor='#0F172A', linewidth=0.6)
         ax_attn.set_yticks(y_pos)
         ax_attn.set_yticklabels([f"C{10-i}" for i in range(11)], fontsize=6.8, fontweight='bold', color='#1E293B')
         ax_attn.set_xlim(0, 1.0)
         ax_attn.set_xticks([0, 0.5, 1.0])
         ax_attn.set_xticklabels(['0', '0.5', '1.0'], fontsize=6.5, color='#475569')
-        ax_attn.set_title("Pesi Attention (SE)\nPer Canale", fontsize=7.2, fontweight='bold', color='#0F172A', pad=3)
+        attn_title = f"Pesi Attention (SE)\nPatch Zona Z{self.selected_zone_idx+1}" if is_local else "Pesi Attention (SE)\nGlobale Frame"
+        ax_attn.set_title(attn_title, fontsize=7.2, fontweight='bold', color=('#1D4ED8' if is_local else '#0F172A'), pad=3)
         ax_attn.axvline(0.5, color='#DC2626', linestyle=':', linewidth=0.8, alpha=0.7)
 
     def render_mode_auxiliary_network(self):
@@ -1132,10 +1182,14 @@ class NeuralInputsVisualizer:
         self.show_auxiliary = not self.show_auxiliary
         self.render()
 
-    def toggle_c1_mode(self, event=None):
-        """Alterna tra visualizzazione della singola zona d'ombra selezionata e tutte le zone nel canale C1."""
-        self.show_full_c1 = not self.show_full_c1
+    def toggle_global_view(self, event=None):
+        """Alterna tra Vista Globale (25m) e Vista Patch 64x64 locale della zona d'ombra selezionata."""
+        self.show_global_view = not self.show_global_view
+        self.show_full_c1 = self.show_global_view
         self.render()
+
+    def toggle_c1_mode(self, event=None):
+        self.toggle_global_view(event)
 
     def cycle_zone(self, delta):
         """Passa alla zona d'ombra precedente o successiva."""
@@ -1156,7 +1210,7 @@ class NeuralInputsVisualizer:
         elif event.key in ['x', 'X', 'down']:
             self.cycle_zone(1)
         elif event.key in ['c', 'C']:
-            self.toggle_c1_mode()
+            self.toggle_global_view()
         elif event.key in ['space', 't', 'T', 'm', 'M']:
             self.toggle_auxiliary()
         elif event.key in ['s', 'S']:
@@ -1179,7 +1233,7 @@ class NeuralInputsVisualizer:
             pass
 
     def on_mouse_click(self, event):
-        """Seleziona una zona d'ombra con il click del mouse (focalizza C1 sulla zona selezionata senza forzare la rete ausiliaria)."""
+        """Seleziona una zona d'ombra con il click del mouse: focalizza tutti gli 11 canali sulla patch locale 64x64."""
         if event.inaxes != self.ax_map:
             return
         x, y = event.xdata, event.ydata
@@ -1189,6 +1243,7 @@ class NeuralInputsVisualizer:
         for i, item in enumerate(self.drawn_occlusions):
             if item['path'].contains_point((x, y)):
                 self.selected_zone_idx = i
+                self.show_global_view = False
                 self.show_full_c1 = False
                 self.render()
                 break

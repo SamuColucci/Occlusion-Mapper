@@ -35,7 +35,7 @@ if ROOT_DIR not in sys.path:
 from dataset_adapter.factory_dataset import create_adapter
 from raycaster.ray_caster import RayCaster
 from ground_truth.ground_truth_extractor_synthetic import compute_synthetic_ground_truth, get_occluder_filter_explanation
-from ground_truth.ground_truth_extractor import rasterize_polygon, extract_real_occlusion_boxes
+from ground_truth.ground_truth_extractor import rasterize_polygon, extract_real_occlusion_boxes, clean_occlusion_polygon
 
 SYNC_FILE = os.path.join(ROOT_DIR, "scratch", "sync_frame.txt")
 
@@ -246,6 +246,8 @@ class GroundTruthOcclusionVisualizer:
         else:
             # Modalità SINTETICA NEURO-SIMBOLICA (Spazio 3D + HD-Map entro 25m)
             syn_boxes = []
+            circle_25m = ShapelyPoint(0, 0).buffer(self.max_range)
+            boxes_by_token = {b.token: b for b in all_boxes}
 
             occ_polygons = []
             for occ in self.occlusions:
@@ -254,10 +256,19 @@ class GroundTruthOcclusionVisualizer:
                     sp = ShapelyPolygon(pts)
                     if not sp.is_valid:
                         sp = sp.buffer(0)
-                    if sp.is_valid and sp.area > 0.05:
-                        occ_polygons.append((sp, occ))
-
-            circle_25m = ShapelyPoint(0, 0).buffer(self.max_range)
+                    sp_vis = sp.intersection(circle_25m)
+                    if sp_vis.is_empty or sp_vis.area < 0.25:
+                        continue
+                    b_obj = boxes_by_token.get(occ.get("object_token"))
+                    clean_polys = clean_occlusion_polygon(
+                        sp_vis,
+                        occluder_box=b_obj,
+                        static_boxes=getattr(self, 'static_boxes', []),
+                        min_area=0.25,
+                        min_width=0.30
+                    )
+                    for cp in clean_polys:
+                        occ_polygons.append((cp, occ))
             all_generated_points = []
             if "SEM" in self.gt_mode:
                 gt_mode_param = "semantic"
@@ -499,6 +510,7 @@ class GroundTruthOcclusionVisualizer:
 
         # Poligoni reali dei Coni d'Ombra (Raycasting Occlusions strettamente entro 25m)
         circle_25m = ShapelyPoint(0, 0).buffer(self.max_range)
+        boxes_by_token = {b.token: b for b in self.frame_data.get('boxes', [])}
         for occ in self.occlusions:
             poly_pts = occ.get("polygon_points_m", [])
             if len(poly_pts) < 3:
@@ -508,42 +520,43 @@ class GroundTruthOcclusionVisualizer:
             if not p.is_valid:
                 p = p.buffer(0)
             p_vis = p.intersection(circle_25m)
-            if p_vis.is_empty or p_vis.area < 0.05:
+            if p_vis.is_empty or p_vis.area < 0.25:
                 continue
-            
-            has_occluded = False
-            boxes_in_zone = []
-            for box in occluded_boxes:
-                corners_bev = box.corners_3d[:2, [0, 1, 5, 4]].T
-                if p_vis.intersects(ShapelyPolygon(corners_bev)):
-                    has_occluded = True
-                    boxes_in_zone.append(box)
-
-            # Se in modalità REALE_POSITIVES, mostra SOLO le zone d'ombra che ospitano ostacoli reali
-            if self.gt_mode == "REALE_POSITIVES" and not has_occluded:
-                continue
-
-            face_c = '#FED7AA' if has_occluded else c_cone  # Arancione tenue per le ombre con oggetti
-            edge_c = '#EA580C' if has_occluded else c_cone_edge
-            lw = 1.6 if has_occluded else 0.9
 
             occ_tok = occ.get("object_token", "")
-            occ_wlh = None
-            if occ_tok:
-                for b in self.frame_data.get('boxes', []):
-                    if b.token == occ_tok:
-                        occ_wlh = b.wlh
+            b_obj = boxes_by_token.get(occ_tok, None)
+            occ_wlh = b_obj.wlh if b_obj is not None and hasattr(b_obj, 'wlh') else None
+            if occ_wlh is None:
+                for sb in getattr(self, 'static_boxes', []):
+                    if sb.token == occ_tok:
+                        occ_wlh = [sb.max_x - sb.min_x, sb.max_y - sb.min_y, sb.max_z - sb.min_z]
                         break
-                if occ_wlh is None:
-                    for sb in getattr(self, 'static_boxes', []):
-                        if sb.token == occ_tok:
-                            occ_wlh = [sb.max_x - sb.min_x, sb.max_y - sb.min_y, sb.max_z - sb.min_z]
-                            break
 
-            sub_geoms = list(p_vis.geoms) if p_vis.geom_type == 'MultiPolygon' else [p_vis]
-            for geom in sub_geoms:
-                if geom.area < 0.05:
+            clean_polys = clean_occlusion_polygon(
+                p_vis,
+                occluder_box=b_obj,
+                static_boxes=getattr(self, 'static_boxes', []),
+                min_area=0.25,
+                min_width=0.30
+            )
+
+            for geom in clean_polys:
+                has_occluded = False
+                boxes_in_zone = []
+                for box in occluded_boxes:
+                    corners_bev = box.corners_3d[:2, [0, 1, 5, 4]].T
+                    if geom.intersects(ShapelyPolygon(corners_bev)):
+                        has_occluded = True
+                        boxes_in_zone.append(box)
+
+                # Se in modalità REALE_POSITIVES, mostra SOLO le zone d'ombra che ospitano ostacoli reali
+                if self.gt_mode == "REALE_POSITIVES" and not has_occluded:
                     continue
+
+                face_c = '#FED7AA' if has_occluded else c_cone  # Arancione tenue per le ombre con oggetti
+                edge_c = '#EA580C' if has_occluded else c_cone_edge
+                lw = 1.6 if has_occluded else 0.9
+
                 c_pts = np.array(geom.exterior.coords)
                 patch = MplPolygon(c_pts, closed=True,
                                    facecolor=face_c, edgecolor=edge_c,

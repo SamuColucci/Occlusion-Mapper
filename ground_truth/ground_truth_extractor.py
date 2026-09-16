@@ -290,6 +290,94 @@ def get_occlusion_ground_truth_target(target_tensor, poly_pts):
     return target_classes
 
 
+def clean_occlusion_polygon(
+    poly,
+    occluder_box=None,
+    static_boxes=None,
+    min_area=0.25,
+    min_width=0.30
+):
+    """
+    Pulisce geometricamente una zona d'ombra (impenetrabilita dei corpi solidi):
+    1. Sottrae la sagoma solida 2D dell'oggetto occludente che genera l'ombra (auto, camion, ecc.).
+    2. Sottrae l'ingombro solido di muri ed edifici static man-made.
+    3. Scarta micro-striscioline artefatte ai bordi (area < min_area o larghezza minima OBB < min_width).
+    Restituisce una lista di poligoni Shapely puliti e fisicamente ammissibili.
+    """
+    from shapely.geometry import Polygon as ShapelyPolygon
+    from shapely.ops import unary_union
+
+    if poly is None:
+        return []
+    if isinstance(poly, (list, np.ndarray)):
+        if len(poly) < 3:
+            return []
+        poly = ShapelyPolygon(poly)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    if poly.is_empty or poly.area < min_area:
+        return []
+
+    # 1. Sottrazione della sagoma solida dell'oggetto occludente
+    if occluder_box is not None:
+        try:
+            if hasattr(occluder_box, 'corners_3d'):
+                c = occluder_box.corners_3d[:2, [0, 1, 5, 4]].T
+            elif hasattr(occluder_box, 'corners'):
+                c = occluder_box.corners()[:2, [0, 1, 5, 4]].T
+            elif hasattr(occluder_box, 'bottom_corners'):
+                c = occluder_box.bottom_corners()[:2].T
+            else:
+                c = None
+            if c is not None:
+                b_poly = ShapelyPolygon(c)
+                if not b_poly.is_valid:
+                    b_poly = b_poly.buffer(0)
+                if poly.intersects(b_poly):
+                    poly = poly.difference(b_poly)
+        except Exception:
+            pass
+
+    if poly.is_empty:
+        return []
+
+    # 2. Sottrazione delle strutture statiche man-made (muri ed edifici)
+    if static_boxes:
+        try:
+            s_polys = []
+            for sb in static_boxes:
+                sp = ShapelyPolygon([[sb.min_x, sb.min_y], [sb.max_x, sb.min_y], [sb.max_x, sb.max_y], [sb.min_x, sb.max_y]])
+                if sp.is_valid and poly.intersects(sp):
+                    s_polys.append(sp)
+            if s_polys:
+                u_static = unary_union(s_polys)
+                poly = poly.difference(u_static)
+        except Exception:
+            pass
+
+    if poly.is_empty:
+        return []
+
+    # 3. Estrazione componenti e scarto micro-striscioline artefatte ai bordi
+    sub_geoms = list(poly.geoms) if poly.geom_type in ['MultiPolygon', 'GeometryCollection'] else [poly]
+    valid_geoms = []
+    for g in sub_geoms:
+        if not isinstance(g, ShapelyPolygon) or g.is_empty or g.area < min_area:
+            continue
+        # Verifica larghezza minima OBB per scartare striscioline artefatte lungo i bordi
+        if min_width > 0:
+            mrr = g.minimum_rotated_rectangle
+            coords = np.array(mrr.exterior.coords)[:-1]
+            if len(coords) >= 4:
+                e1 = np.linalg.norm(coords[0] - coords[1])
+                e2 = np.linalg.norm(coords[1] - coords[2])
+                if min(e1, e2) < min_width:
+                    continue
+        valid_geoms.append(g)
+
+    return valid_geoms
+
+
 # Blocco principale di autoverifica (Self-Test) se eseguito direttamente
 if __name__ == "__main__":
     import os

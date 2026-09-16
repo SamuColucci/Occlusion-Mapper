@@ -20,7 +20,13 @@ from torch.utils.data import TensorDataset, DataLoader
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from dataset_adapter.factory_dataset import create_adapter
-from ground_truth.ground_truth_extractor import extract_ground_truth_masks, rasterize_polygon, get_occlusion_ground_truth_target
+from raycaster.ray_caster import RayCaster
+from ground_truth.ground_truth_extractor import (
+    extract_ground_truth_masks,
+    rasterize_polygon,
+    get_occlusion_ground_truth_target,
+    clean_occlusion_polygon
+)
 from ground_truth.ground_truth_extractor_synthetic import compute_synthetic_ground_truth
 from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
 from architettura_neurale.loss_functions import AsymmetricLoss
@@ -138,7 +144,16 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
                         lidar_bev[py, px] = 1.0
             lidar_bev = lidar_bev * mask_25m
 
-            # 2. Canale 1: Ombre Raycasting cumulative entro 25m
+            # Rilevamento pseudo-box statici (muri/edifici) per pulizia fisica delle ombre
+            boxes_all = frame_data.get('boxes', [])
+            boxes_by_token = {b.token: b for b in boxes_all}
+            try:
+                rc = RayCaster(frame_data, verbose=False)
+                static_boxes = rc.detect_static_manmade_boxes(boxes_all)
+            except Exception:
+                static_boxes = []
+
+            # 2. Canale 1: Ombre Raycasting cumulative entro 25m (pulite da occludori e muri)
             occlusion_mask = np.zeros((200, 200), dtype=np.float32)
             for occ in occs:
                 pts = occ.get("polygon_points_m", [])
@@ -148,8 +163,15 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
                         sp_occ = sp_occ.buffer(0)
                     sp_occ_25 = sp_occ.intersection(circle_25m)
                     if not sp_occ_25.is_empty and sp_occ_25.area >= 0.1:
-                        sub_geoms = list(sp_occ_25.geoms) if sp_occ_25.geom_type == 'MultiPolygon' else [sp_occ_25]
-                        for sg in sub_geoms:
+                        b_occ = boxes_by_token.get(occ.get("object_token"))
+                        clean_polys_c1 = clean_occlusion_polygon(
+                            sp_occ_25,
+                            occluder_box=b_occ,
+                            static_boxes=static_boxes,
+                            min_area=0.25,
+                            min_width=0.30
+                        )
+                        for sg in clean_polys_c1:
                             coords = np.array(sg.exterior.coords)[:-1]
                             m = rasterize_polygon(coords)
                             occlusion_mask = np.maximum(occlusion_mask, m)
@@ -176,7 +198,6 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
 
             import cv2
             dt_road_map = cv2.distanceTransform((1 - drivable_mask).astype(np.uint8), cv2.DIST_L2, 3) * 0.4
-            boxes_by_token = {b.token: b for b in frame_data.get('boxes', [])}
 
             for occ in occs:
                 pts = occ.get("polygon_points_m", [])
@@ -201,8 +222,14 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
                 b_obj = boxes_by_token.get(occ_tok, None)
                 occ_wlh = b_obj.wlh if (b_obj is not None and hasattr(b_obj, 'wlh')) else None
 
-                sub_polys = list(sp_25m.geoms) if sp_25m.geom_type == 'MultiPolygon' else [sp_25m]
-                for sp_sub in sub_polys:
+                clean_polys = clean_occlusion_polygon(
+                    sp_25m,
+                    occluder_box=b_obj,
+                    static_boxes=static_boxes,
+                    min_area=0.25,
+                    min_width=0.30
+                )
+                for sp_sub in clean_polys:
                     if sp_sub.area < 0.1:
                         continue
 
@@ -271,7 +298,9 @@ def train_attention_neuro(epochs=20, batch_size=64, lr=1e-3, gt_mode="geometric"
 
                     scalars = torch.tensor([area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f], dtype=torch.float32)
                     target = torch.tensor(gt_target, dtype=torch.float32)
-                    occ_mask_t = AttentionPerZoneModel.build_compatibility_mask(occ_name, occ_wlh)
+                    occ_mask_t = AttentionPerZoneModel.build_compatibility_mask(
+                        occ_name, occ_wlh, road_f=road_f, roadside_f=roadside_f
+                    )
 
                     patches_list.append(patch_res)
                     scalars_list.append(scalars)

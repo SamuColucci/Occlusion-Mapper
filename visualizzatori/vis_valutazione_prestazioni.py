@@ -43,7 +43,8 @@ from ground_truth.ground_truth_extractor import (
     extract_ground_truth_masks,
     rasterize_polygon,
     get_occlusion_ground_truth_target,
-    extract_real_occlusion_ground_truth
+    extract_real_occlusion_ground_truth,
+    clean_occlusion_polygon
 )
 from ground_truth.ground_truth_extractor_synthetic import compute_synthetic_ground_truth
 from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
@@ -431,6 +432,10 @@ class EvaluationDashboardVisualizer:
                             d = json.load(f)
                             occs = d.get("occlusions", []) if isinstance(d, dict) else d
 
+                    boxes_by_token = {b.token: b for b in self.frame_data.get('boxes', [])}
+                    for sb in getattr(self, 'static_boxes', []):
+                        boxes_by_token[sb.token] = sb
+
                     circle_25m = Point(0, 0).buffer(self.max_range - 0.4)
                     inferred = []
                     for cz in cached_zones:
@@ -450,13 +455,21 @@ class EvaluationDashboardVisualizer:
                         if poly_vis.is_empty or poly_vis.area < 0.02:
                             continue
 
-                        if poly_vis.geom_type == 'Polygon':
-                            poly_main = poly_vis
-                        elif poly_vis.geom_type in ['MultiPolygon', 'GeometryCollection']:
-                            polys = [g for g in poly_vis.geoms if g.geom_type == 'Polygon']
-                            poly_main = max(polys, key=lambda g: g.area) if polys else sp
-                        else:
-                            poly_main = sp
+                        b_obj = boxes_by_token.get(occ.get("object_token"))
+                        clean_polys = clean_occlusion_polygon(
+                            poly_vis,
+                            occluder_box=b_obj,
+                            static_boxes=getattr(self, 'static_boxes', []),
+                            min_area=0.25,
+                            min_width=0.30
+                        )
+                        if not clean_polys:
+                            continue
+
+                        poly_main = clean_polys[0]
+                        coords = np.array(poly_main.exterior.coords)[:-1]
+                        if len(coords) < 3:
+                            continue
 
                         pt = poly_main.representative_point()
                         cx_m, cy_m = float(pt.x), float(pt.y)
@@ -469,15 +482,15 @@ class EvaluationDashboardVisualizer:
 
                         inferred.append({
                             "occ": occ,
-                            "poly_xy": poly_xy,
+                            "poly_xy": coords,
                             "center": (cx_m, cy_m),
-                            "area": float(occ.get("area_sqm", sp.area)),
-                            "dist": float(occ.get("distance_m", np.hypot(cx_m, cy_m))),
-                            "road_f": float(occ.get("road_fraction", 0.0)),
-                            "side_f": float(occ.get("sidewalk_fraction", 0.0)),
-                            "cross_f": float(occ.get("crosswalk_fraction", 0.0)),
-                            "roadside_f": float(occ.get("roadside_fraction", 0.0)),
-                            "min_d_road": 0.0,
+                            "area": float(cz.get("area", occ.get("area_sqm", sp.area))),
+                            "dist": float(cz.get("dist", occ.get("distance_m", np.hypot(cx_m, cy_m)))),
+                            "road_f": float(cz.get("road_f", occ.get("road_fraction", 0.0))),
+                            "side_f": float(cz.get("side_f", occ.get("sidewalk_fraction", 0.0))),
+                            "cross_f": float(cz.get("cross_f", occ.get("crosswalk_fraction", 0.0))),
+                            "roadside_f": float(cz.get("roadside_f", occ.get("roadside_fraction", 0.0))),
+                            "min_d_road": float(cz.get("min_d_road", 0.0)),
                             "probs_4": cz["probs_4"],
                             "pred_binary": pred_b,
                             "gt_target_4": gt_b,
@@ -664,7 +677,9 @@ class EvaluationDashboardVisualizer:
 
                 scalars = torch.tensor([[area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]], dtype=torch.float32).to(self.device)
 
-                occluder_mask = AttentionPerZoneModel.build_compatibility_mask(occ_name, occ_wlh, device=self.device)
+                occluder_mask = AttentionPerZoneModel.build_compatibility_mask(
+                    occ_name, occ_wlh, road_f=road_f, roadside_f=roadside_f, device=self.device
+                )
                 with torch.no_grad():
                     logits = model(patch_res, scalars, occluder_mask=occluder_mask)
                     out_6 = torch.sigmoid(logits).squeeze(0).cpu().numpy()
@@ -970,6 +985,18 @@ class EvaluationDashboardVisualizer:
                     'default_alpha': alpha_fill,
                     'default_z': 5
                 })
+
+        # Strutture statiche man-made (muri/edifici rilevati da clustering LiDAR)
+        c_static_face = '#EF4444'
+        c_static_edge = '#B91C1C'
+        for sb in getattr(self, 'static_boxes', []):
+            c_x = (sb.min_x + sb.max_x) / 2.0
+            c_y = (sb.min_y + sb.max_y) / 2.0
+            if np.hypot(c_x, c_y) <= self.max_range:
+                rect = Rectangle((sb.min_x, sb.min_y), sb.max_x - sb.min_x, sb.max_y - sb.min_y,
+                                 facecolor=c_static_face, edgecolor=c_static_edge,
+                                 linewidth=1.8, linestyle='--', alpha=0.45, zorder=6)
+                ax.add_patch(rect)
 
         # Oggetti visibili LiDAR reali
         boxes = self.frame_data.get('boxes', [])

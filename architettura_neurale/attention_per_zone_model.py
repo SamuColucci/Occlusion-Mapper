@@ -218,12 +218,21 @@ class AttentionPerZoneModel(nn.Module):
         return logits
 
     @staticmethod
-    def build_compatibility_mask(occluder_name=None, occluder_wlh=None, device=None) -> torch.Tensor:
+    def build_compatibility_mask(
+        occluder_name=None,
+        occluder_wlh=None,
+        road_f=None,
+        roadside_f=None,
+        device=None
+    ) -> torch.Tensor:
         """
-        Modulo Simbolico Integrato: genera il tensore di consistenza fisica M in {0, 1}^6:
+        Modulo Simbolico Integrato (Ontologia Fisico-Spaziale + Affordance HD-Map):
+        Genera il tensore di consistenza fisica M in {0, 1}^6:
         - Pedone / Ciclista / Sagoma stretta (w < 0.95m): ammessi solo VRU (Pedoni/Bici, indici 2 e 4)
-        - Auto standard (h < 2.5m, non furgone pesante, non muro): escluso Camion/Bus (indice 1)
-        - Mezzo pesante / Muro statico: ammette tutte le categorie
+        - Auto standard (h < 1.50m, non pesante, non muro): escluso Camion/Bus (indice 1)
+        - Affordance HD-Map: Veicoli (Auto, Camion, Moto) ammessi SOLO se la zona contiene carreggiata
+          o si trova a bordo strada entro 2.5m (road_f >= 0.05 o roadside_f >= 0.15).
+          In zone 100% terreno o pedonali isolate da strade, Auto, Camion e Moto vengono categoricamente escluse.
         """
         # [Auto(0), Camion(1), Pedone(2), Moto(3), Bici(4), Barriera(5)]
         mask = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
@@ -244,6 +253,13 @@ class AttentionPerZoneModel(nn.Module):
             elif not (is_heavy or is_manmade or is_tall):
                 # Berlina molto bassa (h < 1.50m): quota LiDAR a 1.84m esclude fisicamente Camion/Bus (1)
                 mask = [1.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+
+        # Vincolo di Affordance Semantica (HD-Map): Veicoli ammessi solo su asfalto o accosto al cordolo
+        if road_f is not None and roadside_f is not None:
+            if road_f < 0.05 and roadside_f < 0.15:
+                mask[0] = 0.0  # Auto
+                mask[1] = 0.0  # Camion
+                mask[3] = 0.0  # Moto
 
         tensor_m = torch.tensor(mask, dtype=torch.float32)
         if device is not None:

@@ -444,7 +444,9 @@ class NeuralInferenceVisualizer:
                 # Vettore scalari: [area, dist, width, length, road_f, side_f, cross_f, roadside_f, terr_f]
                 scalars = torch.tensor([[area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]], dtype=torch.float32).to(self.device)
 
-                occluder_mask = AttentionPerZoneModel.build_compatibility_mask(occ_name, occ_wlh, device=self.device)
+                occluder_mask = AttentionPerZoneModel.build_compatibility_mask(
+                    occ_name, occ_wlh, road_f=road_f, roadside_f=roadside_f, device=self.device
+                )
                 with torch.no_grad():
                     out_6 = torch.sigmoid(model(patch_res, scalars, occluder_mask=occluder_mask)).squeeze(0).cpu().numpy()
 

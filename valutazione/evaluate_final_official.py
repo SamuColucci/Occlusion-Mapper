@@ -22,11 +22,13 @@ import torch.nn.functional as F
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from dataset_adapter.factory_dataset import create_adapter
+from raycaster.ray_caster import RayCaster
 from ground_truth.ground_truth_extractor import (
     extract_ground_truth_masks,
     rasterize_polygon,
     get_occlusion_ground_truth_target,
-    extract_real_occlusion_ground_truth
+    extract_real_occlusion_ground_truth,
+    clean_occlusion_polygon
 )
 from ground_truth.ground_truth_extractor_synthetic import (
     compute_synthetic_ground_truth,
@@ -214,6 +216,15 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                     lidar_bev[py, px] = 1.0
         lidar_bev = lidar_bev * mask_25m
 
+        # Rileva pseudo-box statici (muri/edifici) per pulizia geometrica
+        all_frame_boxes = frame_data.get('boxes', [])
+        boxes_by_token = {b.token: b for b in all_frame_boxes}
+        try:
+            rc = RayCaster(frame_data, verbose=False)
+            static_boxes = rc.detect_static_manmade_boxes(all_frame_boxes)
+        except Exception:
+            static_boxes = []
+
         # 2. Canale 1: Ombre Raycasting cumulative entro 25m
         occlusion_mask = np.zeros((GRID_DIM, GRID_DIM), dtype=np.float32)
         for occ in occs:
@@ -224,8 +235,15 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                     sp_occ = sp_occ.buffer(0)
                 sp_occ_25 = sp_occ.intersection(circle_25m)
                 if not sp_occ_25.is_empty and sp_occ_25.area >= 0.1:
-                    sub_geoms = list(sp_occ_25.geoms) if sp_occ_25.geom_type == 'MultiPolygon' else [sp_occ_25]
-                    for sg in sub_geoms:
+                    b_occ = boxes_by_token.get(occ.get("object_token"))
+                    clean_polys_c1 = clean_occlusion_polygon(
+                        sp_occ_25,
+                        occluder_box=b_occ,
+                        static_boxes=static_boxes,
+                        min_area=0.25,
+                        min_width=0.30
+                    )
+                    for sg in clean_polys_c1:
                         coords = np.array(sg.exterior.coords)[:-1]
                         m = rasterize_polygon(coords)
                         occlusion_mask = np.maximum(occlusion_mask, m)
@@ -260,8 +278,6 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
 
         import cv2
         dt_road_map = cv2.distanceTransform((1 - drivable_mask).astype(np.uint8), cv2.DIST_L2, 3) * VOXEL_SIZE
-        all_frame_boxes = frame_data.get('boxes', [])
-        boxes_by_token = {b.token: b for b in all_frame_boxes}
         occluder_tokens = {occ.get('object_token') for occ in occs if occ.get('object_token')}
 
         circle_25m = ShapelyPoint(0, 0).buffer(25.0)
@@ -288,8 +304,14 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
             b_obj = boxes_by_token.get(occ_tok, None)
             occ_wlh = b_obj.wlh if (b_obj is not None and hasattr(b_obj, 'wlh')) else None
 
-            sub_polys = list(sp_25m.geoms) if sp_25m.geom_type == 'MultiPolygon' else [sp_25m]
-            for sp_sub in sub_polys:
+            clean_polys = clean_occlusion_polygon(
+                sp_25m,
+                occluder_box=b_obj,
+                static_boxes=static_boxes,
+                min_area=0.25,
+                min_width=0.30
+            )
+            for sp_sub in clean_polys:
                 if sp_sub.area < 0.1:
                     continue
 
@@ -369,6 +391,9 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                         p_camion = float(max(b_probs.get("Camion", 0.0), b_probs.get("Bus", 0.0), b_probs.get("Rimorchio", 0.0)))
                         p_vru = float(max(b_probs.get("Pedone", 0.0), b_probs.get("Bicicletta", 0.0), b_probs.get("Moto", 0.0)))
                         p_barr = float(max(b_probs.get("Barriera", 0.0), b_probs.get("Cono", 0.0)))
+                        if road_f < 0.05 and roadside_f < 0.15:
+                            p_auto = 0.0
+                            p_camion = 0.0
                         p4 = [p_auto, p_camion, p_vru, p_barr]
                         pred_4 = np.array([
                             int(p_auto >= 0.28 and area >= 3.5),
@@ -378,7 +403,9 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                         ], dtype=int)
                     else:
                         model = m_info["model"]
-                        occluder_mask = AttentionPerZoneModel.build_compatibility_mask(occ_name, occ_wlh, device=device)
+                        occluder_mask = AttentionPerZoneModel.build_compatibility_mask(
+                            occ_name, occ_wlh, road_f=road_f, roadside_f=roadside_f, device=device
+                        )
                         out_6 = torch.sigmoid(model(patch_res, scalars, occluder_mask=occluder_mask)).squeeze(0).cpu().numpy()
 
                         p4 = [
@@ -469,7 +496,15 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                             "verdict_label": v_label,
                             "risk_score": round(max_prob, 4),
                             "pred_class": CATEGORIES[max_class_idx],
-                            "pred_idx": max_class_idx
+                            "pred_idx": max_class_idx,
+                            "road_f": round(float(road_f), 4),
+                            "side_f": round(float(side_f), 4),
+                            "cross_f": round(float(cross_f), 4),
+                            "terr_f": round(float(terr_f), 4),
+                            "min_d_road": round(float(min_d_road), 2),
+                            "roadside_f": round(float(roadside_f), 4),
+                            "area": round(float(area), 2),
+                            "dist": round(float(dist), 2)
                         })
 
         # Calcola f1/rec/prec aggregate per questo frame
