@@ -151,11 +151,11 @@ class EvaluationDashboardVisualizer:
         self.current_model_key = "NEURO_SIMB" if initial_model.upper() in ["HYBRID", "NEURO_SIMB"] else initial_model.upper()
         self.current_gt_key = "NEURO_SIMB" if initial_gt.upper() in ["HYBRID", "NEURO_SIMB"] else initial_gt.upper()
 
-        # Split standard nuScenes mini (train vs val inedito)
+        # Split standard nuScenes trainval (train vs val inedito)
         from nuscenes.utils.splits import create_splits_scenes
         splits_dict = create_splits_scenes()
-        self.train_scenes = set(splits_dict.get('mini_train', []))
-        self.val_scenes = set(splits_dict.get('mini_val', []))
+        self.train_scenes = set(splits_dict.get('train', []))
+        self.val_scenes = set(splits_dict.get('val', []))
 
         self.train_indices = []
         self.val_indices = []

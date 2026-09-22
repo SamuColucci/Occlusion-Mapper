@@ -49,9 +49,9 @@ except ImportError:
 
 
 class NuScenesOfficialVisualizer:
-    def __init__(self, dataroot="./nuscenes", version="v1.0-mini", initial_idx=0, mode=1):
+    def __init__(self, dataroot="./nuscenes", version="v1.0-trainval", initial_idx=0, mode=1):
         print("\n" + "=" * 80)
-        print(f"   NUSCENES OFFICIAL VIEWER - DEVKIT EXPLORER (v1.0-mini)")
+        print(f"   NUSCENES OFFICIAL VIEWER - DEVKIT EXPLORER ({version})")
         print("=" * 80)
         print(f"Caricamento database nuScenes da: {dataroot} ...")
 
@@ -465,7 +465,7 @@ def main():
     parser = argparse.ArgumentParser(description="Visualizzatore Ufficiale nuScenes - Explorer Interattivo")
     parser.add_argument("sample_pos", nargs="?", type=int, default=None, help="Numero del campione iniziale a cui saltare (1-404)")
     parser.add_argument("--dataroot", "-d", type=str, default="./nuscenes", help="Percorso del dataset nuScenes")
-    parser.add_argument("--version", "-v", type=str, default="v1.0-mini", help="Versione del dataset nuScenes")
+    parser.add_argument("--version", "-v", type=str, default="v1.0-trainval", help="Versione del dataset nuScenes")
     parser.add_argument("--sample", "-s", type=int, default=None, help="Indice del sample iniziale (0-403)")
     parser.add_argument("--scene", type=str, default=None, help="Nome della scena specifica da caricare (es. scene-0061)")
     parser.add_argument("--mode", "-m", type=int, default=1, choices=[1, 2, 3],

@@ -112,7 +112,7 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
     """
     Esegue la valutazione a passaggio singolo su GPU per tutti i modelli specificati,
     calcolando simultaneamente il TRIPLO CONFRONTO (su GT Reale, GT Sintetica Geom e GT Sintetica Sem).
-    Supporta: 'val' (2 scene mai viste, default), 'train' (8 scene di training), 'all' (tutte).
+    Supporta: 'val' (150 scene mai viste, default), 'train' (700 scene di training), 'all' (tutte).
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n• Dispositivo di calcolo: {device}")
@@ -125,8 +125,8 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
 
     from nuscenes.utils.splits import create_splits_scenes
     splits_dict = create_splits_scenes()
-    train_scenes = set(splits_dict.get('mini_train', []))
-    val_scenes = set(splits_dict.get('mini_val', []))
+    train_scenes = set(splits_dict.get('train', []))
+    val_scenes = set(splits_dict.get('val', []))
 
     valid_frame_indices = []
     for idx in range(num_samples):
@@ -664,7 +664,7 @@ def main():
     parser.add_argument("--gt_mode", type=str, default="hybrid", choices=["geometric", "semantic", "hybrid"],
                         help="Strategia della GT Sintetica di test: 'geometric', 'semantic' o 'hybrid'")
     parser.add_argument("--split", type=str, default="val", choices=["val", "train", "all"],
-                        help="Split nuScenes su cui valutare: 'val' (2 scene mai viste, default), 'train' o 'all'")
+                        help="Split nuScenes su cui valutare: 'val' (150 scene mai viste, default), 'train' o 'all'")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

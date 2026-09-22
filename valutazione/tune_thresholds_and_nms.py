@@ -64,7 +64,7 @@ def run_benchmark():
     num_samples = adapter.get_num_samples()
     from nuscenes.utils.splits import create_splits_scenes
     splits_dict = create_splits_scenes()
-    val_scenes = set(splits_dict.get('mini_val', []))
+    val_scenes = set(splits_dict.get('val', []))
 
     valid_indices = []
     for idx in range(num_samples):

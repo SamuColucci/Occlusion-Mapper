@@ -36,8 +36,8 @@ class NuscenesDatasetAdapter(AdapterDataset):
         # Invocazione del costruttore della classe padre astratta
         super().__init__(dataroot)
 
-        # Inizializzazione del dataset NuScenes selezionando la versione 'v1.0-mini'
-        self.nusc = NuScenes(version="v1.0-mini", dataroot=dataroot, verbose=False)
+        # Inizializzazione del dataset NuScenes selezionando la versione 'v1.0-trainval'
+        self.nusc = NuScenes(version="v1.0-trainval", dataroot=dataroot, verbose=False)
 
         # Controllo di sicurezza sull'inizializzazione corretta del dataset
         if self.nusc is None:
@@ -45,6 +45,19 @@ class NuscenesDatasetAdapter(AdapterDataset):
         
         # Recupero dell'elenco completo dei campioni (sample) presenti nel dataset
         self.all_samples = self.nusc.sample
+
+        # Le mappe vettoriali distinte sono solo 4 per l'intero dataset, mentre i fotogrammi
+        # sono decine di migliaia: vengono conservate qui per non riparsarne il JSON ad ogni frame
+        self._map_cache = {}
+
+    # Costruisce in anticipo tutte le mappe vettoriali citate dai log del dataset.
+    # Va invocato prima di distribuire il lavoro su piu processi: cosi le mappe sono
+    # gia in memoria al momento del fork e i figli le condividono invece di ricostruirle
+    def precarica_mappe(self) -> None:
+        for log in self.nusc.log:
+            map_name = log['location']
+            if map_name not in self._map_cache:
+                self._map_cache[map_name] = NuScenesMap(dataroot=self.dataroot, map_name=map_name)
 
     # Metodo per ottenere il numero totale di campioni del dataset
     def get_num_samples(self) -> int:
@@ -140,7 +153,9 @@ class NuscenesDatasetAdapter(AdapterDataset):
         map_name = log['location']
 
         # Salviamo in nusc_map l'oggetto MappaVettoriale associata alla scena corrente
-        nusc_map = NuScenesMap(dataroot=self.dataroot, map_name=map_name)
+        if map_name not in self._map_cache:
+            self._map_cache[map_name] = NuScenesMap(dataroot=self.dataroot, map_name=map_name)
+        nusc_map = self._map_cache[map_name]
 
         # Angolo di direzione (yaw) dell'auto robot in gradi
         yaw_deg = np.degrees(q.yaw_pitch_roll[0])

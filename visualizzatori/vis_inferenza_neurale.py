@@ -842,7 +842,7 @@ class NeuralInferenceVisualizer:
         # Metadati descrittivi ben spaziati a sinistra senza overflow
         hazards_count = sum(1 for m in self.inferred_occlusions if m["is_hazard"])
         meta_lines = [
-            f"Dataset: nuScenes (v1.0-mini)  |  Scena: {self.scene_name}",
+            f"Dataset: nuScenes (v1.0-trainval)  |  Scena: {self.scene_name}",
             f"Campione: {self.current_idx + 1} / {self.total_frames}  |  Latenza GPU: {self.inference_latency_ms:.1f} ms",
             f"Zone d'Ombra: {len(self.inferred_occlusions)}  |  Pericoli Predetti (Rossi): {hazards_count}"
         ]
