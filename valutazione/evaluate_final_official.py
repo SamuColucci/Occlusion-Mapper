@@ -125,8 +125,9 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
 
     from nuscenes.utils.splits import create_splits_scenes
     splits_dict = create_splits_scenes()
-    train_scenes = set(splits_dict.get('train', []))
-    val_scenes = set(splits_dict.get('val', []))
+    prefix = "mini_" if getattr(adapter.nusc, "version", "") == "v1.0-mini" else ""
+    train_scenes = set(splits_dict.get(f"{prefix}train", []))
+    val_scenes = set(splits_dict.get(f"{prefix}val", []))
 
     valid_frame_indices = []
     for idx in range(num_samples):

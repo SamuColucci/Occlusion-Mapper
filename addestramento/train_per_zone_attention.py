@@ -46,6 +46,13 @@ adapter = None
 GT_MODE = None
 
 
+# Inizializzatore dei processi worker su Windows (spawn) e Linux (fork)
+def init_worker_training(shared_adapter, shared_gt_mode):
+    global adapter, GT_MODE
+    adapter = shared_adapter
+    GT_MODE = shared_gt_mode
+
+
 # Costruisce gli 11 canali BEV del fotogramma e ne ritaglia una patch per ogni zona d'ombra.
 # I fotogrammi sono indipendenti, quindi possono essere elaborati in parallelo
 def genera_campioni_fotogramma(idx: int):
@@ -276,8 +283,19 @@ def scrivi_blocco(cartella: str, numero: int, buffer) -> int:
         "targets": torch.stack(buffer[3]),
     }
     tmp = percorso + ".parziale"
-    torch.save(contenuto, tmp)
-    os.replace(tmp, percorso)
+    with open(tmp, "wb") as f:
+        torch.save(contenuto, f)
+    for _ in range(5):
+        try:
+            if os.path.exists(percorso):
+                try:
+                    os.remove(percorso)
+                except Exception:
+                    pass
+            os.replace(tmp, percorso)
+            break
+        except PermissionError:
+            time.sleep(0.2)
     return len(buffer[0])
 
 
@@ -285,8 +303,9 @@ def scrivi_blocco(cartella: str, numero: int, buffer) -> int:
 def seleziona_indici(split: str):
     from nuscenes.utils.splits import create_splits_scenes
     splits_dict = create_splits_scenes()
-    train_scenes = set(splits_dict.get('train', []))
-    val_scenes = set(splits_dict.get('val', []))
+    prefix = "mini_" if getattr(adapter.nusc, "version", "") == "v1.0-mini" else ""
+    train_scenes = set(splits_dict.get(f"{prefix}train", []))
+    val_scenes = set(splits_dict.get(f"{prefix}val", []))
 
     indici = []
     for idx in range(adapter.get_num_samples()):
@@ -322,7 +341,7 @@ def genera_blocchi(cartella: str, gt_mode: str, split: str, workers: int) -> Non
     buffer = ([], [], [], [])
     n_blocco = totale_zone = fotogrammi_nel_blocco = 0
 
-    with Pool(processes=workers) as pool:
+    with Pool(processes=workers, initializer=init_worker_training, initargs=(adapter, GT_MODE)) as pool:
         for n, risultato in enumerate(pool.imap(genera_campioni_fotogramma, indici, chunksize=8), start=1):
             for destinazione, prodotte in zip(buffer, risultato):
                 destinazione.extend(prodotte)
@@ -343,13 +362,17 @@ def genera_blocchi(cartella: str, gt_mode: str, split: str, workers: int) -> Non
     print(f"• Cache scritta in {cartella}: {len(elenco_blocchi(cartella))} blocchi, {totale_zone} zone")
 
 
-def train_attention_neuro(epochs=5, batch_size=64, lr=1e-3, gt_mode="geometric", checkpoint_path=None, split="train", force_extract=False, workers=8):
+def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometric", checkpoint_path=None, split="train", force_extract=False, workers=8):
     """
     Funzione di addestramento universale.
     Supporta:
       - gt_mode: 'geometric', 'semantic', 'hybrid', 'real', 'positives_only', 'all'.
       - split: 'train' (700 scene train, default), 'val' (150 scene val), 'all' (tutte).
     """
+    if epochs is None:
+        _tmp_adapter = create_adapter("nuscenes", "./nuscenes")
+        epochs = 20 if getattr(_tmp_adapter.nusc, 'version', '') == 'v1.0-mini' else 5
+        print(f"• Epoche impostate automaticamente: {epochs} (dataset: {_tmp_adapter.nusc.version})")
     if gt_mode == "all":
         print("\n" + "=" * 80)
         print(f"   AVVIO ADDESTRAMENTO SEQUENZIALE DI TUTTI I MODELLI (--mode all, split: {split.upper()})")
@@ -479,9 +502,8 @@ if __name__ == "__main__":
     parser.add_argument("--mode", "--gt_mode", dest="mode", type=str, default="hybrid",
                         choices=["geometric", "semantic", "hybrid", "real", "positives_only", "all"],
                         help="Modalità: 'geometric', 'semantic', 'hybrid', 'real', 'positives_only' o 'all' per addestrare tutti")
-    parser.add_argument("--epochs", type=int, default=5,
-                        help="Numero di epoche (default: 5). Le 20 originali erano tarate sul dataset mini: "
-                             "con il trainval una sola epoca espone la rete a decine di volte piu' esempi")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Numero di epoche (default automatico: 20 su v1.0-mini, 5 su v1.0-trainval)")
     parser.add_argument("--workers", type=int, default=8,
                         help="Processi paralleli per la generazione del dataset (default: 8)")
     parser.add_argument("--batch_size", type=int, default=64, help="Dimensione del batch (default: 64)")

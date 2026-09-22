@@ -36,6 +36,13 @@ RIGENERA = False
 adapter = None
 
 
+# Inizializzatore per i processi worker su Windows (spawn) e Linux (fork)
+def init_worker(shared_adapter, shared_rigenera):
+    global adapter, RIGENERA
+    adapter = shared_adapter
+    RIGENERA = shared_rigenera
+
+
 # Elabora un singolo fotogramma e ne salva i poligoni d'ombra su disco.
 # I fotogrammi sono indipendenti fra loro, quindi l'ordine di esecuzione non influenza il risultato.
 # Restituisce un numero di poligoni pari a None quando il fotogramma era gia' stato elaborato
@@ -108,7 +115,7 @@ def main():
 
     print(f"Elaborazione di {num_samples} fotogrammi su {args.workers} processi...\n")
     elaborati = saltati = 0
-    with Pool(processes=args.workers) as pool:
+    with Pool(processes=args.workers, initializer=init_worker, initargs=(adapter, RIGENERA)) as pool:
         for completati, (token, n_poligoni) in enumerate(
                 pool.imap_unordered(elabora_fotogramma, range(num_samples), chunksize=8), start=1):
             if n_poligoni is None:

@@ -36,8 +36,15 @@ class NuscenesDatasetAdapter(AdapterDataset):
         # Invocazione del costruttore della classe padre astratta
         super().__init__(dataroot)
 
-        # Inizializzazione del dataset NuScenes selezionando la versione 'v1.0-trainval'
-        self.nusc = NuScenes(version="v1.0-trainval", dataroot=dataroot, verbose=False)
+        # Rilevamento automatico della versione presente nel dataroot (trainval o mini)
+        if os.path.exists(os.path.join(dataroot, "v1.0-trainval")):
+            version = "v1.0-trainval"
+        elif os.path.exists(os.path.join(dataroot, "v1.0-mini")):
+            version = "v1.0-mini"
+        else:
+            version = "v1.0-trainval"
+
+        self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
 
         # Controllo di sicurezza sull'inizializzazione corretta del dataset
         if self.nusc is None:

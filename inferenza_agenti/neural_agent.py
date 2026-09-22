@@ -28,8 +28,7 @@ from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.ops import unary_union
 # Import del dataset neurale e della funzione di rasterizzazione dei poligoni
 from dataset_adapter.dataset_generator_per_zone import OcclusionDatasetNeural, rasterize_polygon
-# Import delle architetture neurali dal modulo architettura_neurale
-from architettura_neurale import AttentionPerZoneModel, PerZoneModel
+from architettura_neurale import AttentionPerZoneModel
 
 # Funzione di utilità per fondere le maschere semantiche del terreno (numpy 2D o liste di poligoni) in un unico poligono Shapely (unary_union)
 def _build_union_(layer_masks):

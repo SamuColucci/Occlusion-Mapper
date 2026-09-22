@@ -154,8 +154,9 @@ class EvaluationDashboardVisualizer:
         # Split standard nuScenes trainval (train vs val inedito)
         from nuscenes.utils.splits import create_splits_scenes
         splits_dict = create_splits_scenes()
-        self.train_scenes = set(splits_dict.get('train', []))
-        self.val_scenes = set(splits_dict.get('val', []))
+        prefix = "mini_" if getattr(self.adapter.nusc, 'version', '') == 'v1.0-mini' else ""
+        self.train_scenes = set(splits_dict.get(f"{prefix}train", []))
+        self.val_scenes = set(splits_dict.get(f"{prefix}val", []))
 
         self.train_indices = []
         self.val_indices = []
@@ -1105,7 +1106,7 @@ class EvaluationDashboardVisualizer:
         is_val = sc_name in getattr(self, 'val_scenes', set())
         if self.nav_val_only and is_val and self.current_idx in self.val_indices:
             val_pos = self.val_indices.index(self.current_idx) + 1
-            split_lbl = f"VAL: {val_pos}/81  [{sc_name}]"
+            split_lbl = f"VAL: {val_pos}/{len(self.val_indices)}  [{sc_name}]"
         else:
             split_lbl = f"SPLIT: VAL (Inedito ★) [{sc_name}]" if is_val else f"SPLIT: TRAIN [{sc_name}]"
         split_bg = "#FEF3C7" if is_val else "#EFF6FF"
@@ -1115,10 +1116,11 @@ class EvaluationDashboardVisualizer:
                       fontsize=8.0, fontweight='bold', color=split_fg, ha='center', va='center',
                       bbox=dict(boxstyle='round,pad=0.28', facecolor=split_bg, edgecolor=split_edge, linewidth=1.1))
 
-        # Filtro Navigazione: Tutti (404) vs Solo VAL (81)
+        # Filtro Navigazione: Tutti vs Solo VAL
         nav_bg = '#FEF3C7' if self.nav_val_only else '#F1F5F9'
         nav_fg = '#92400E' if self.nav_val_only else '#334155'
-        nav_lbl = '★ SOLO VAL (81)' if self.nav_val_only else 'TUTTI I FRAME (404)'
+        val_count = len(self.val_indices)
+        nav_lbl = f'★ SOLO VAL ({val_count})' if self.nav_val_only else f'TUTTI I FRAME ({self.total_frames})'
         ax_nav_flt = self.fig.add_axes([0.470, 0.940, 0.138, 0.034])
         btn_nav_flt = Button(ax_nav_flt, nav_lbl, color=nav_bg, hovercolor='#FDE68A' if self.nav_val_only else '#E2E8F0')
         btn_nav_flt.label.set_fontsize(7.5); btn_nav_flt.label.set_fontweight('bold'); btn_nav_flt.label.set_color(nav_fg)

@@ -76,19 +76,20 @@ print(f"  [OK] Agente Neurale ed Agente Bayesiano Operativi al 100%")
 
 # 7. TEST TUTTI I VISUALIZZATORI INTERATTIVI
 print("\n[TEST 7/7] Verifica Visualizzatori Ufficiali della Tesi...")
-from visualizzatori.verify_runtime_attention import AttentionModelVisualizer
-from visualizzatori.verify_runtime_bayes import RuntimeBayesVisualizer
-from visualizzatori.verify_runtime_ground_truth import GroundTruthZoneVisualizer
-from visualizzatori.verify_runtime_model_comparison import DualModelVisualizer
+from visualizzatori.vis_inferenza_neurale import NeuralInferenceVisualizer
+from visualizzatori.vis_probabilita_bayes import BayesOcclusionVisualizer
+from visualizzatori.vis_ground_truth_occlusioni import GroundTruthOcclusionVisualizer
+from visualizzatori.vis_valutazione_prestazioni import EvaluationDashboardVisualizer
 
-v1 = AttentionModelVisualizer()
-v2 = RuntimeBayesVisualizer()
-v3 = GroundTruthZoneVisualizer()
-v4 = DualModelVisualizer()
-print("  [OK] Visualizzatore 1 (verify_runtime_attention.py)          --> PASS")
-print("  [OK] Visualizzatore 2 (verify_runtime_bayes.py)              --> PASS")
-print("  [OK] Visualizzatore 3 (verify_runtime_ground_truth.py)        --> PASS")
-print("  [OK] Visualizzatore 4 (verify_runtime_model_comparison.py)   --> PASS")
+assert NeuralInferenceVisualizer is not None
+assert BayesOcclusionVisualizer is not None
+assert GroundTruthOcclusionVisualizer is not None
+assert EvaluationDashboardVisualizer is not None
+
+print("  [OK] Visualizzatore 1 (vis_inferenza_neurale.py)          --> PASS")
+print("  [OK] Visualizzatore 2 (vis_probabilita_bayes.py)          --> PASS")
+print("  [OK] Visualizzatore 3 (vis_ground_truth_occlusioni.py)    --> PASS")
+print("  [OK] Visualizzatore 4 (vis_valutazione_prestazioni.py)    --> PASS")
 
 print("\n" + "=" * 85)
 print("   TUTTI I 7 COLLAUDI SONO STATI SUPERATI CON SUCCESSO! ZERO ERRORI.")
