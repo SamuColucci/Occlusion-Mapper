@@ -9,7 +9,8 @@ ENV/
 
 # Checkpoint Pesi Neurali e Tensori Pesanti
 *.pth
-pesi_modelli/
+pesi_modelli
+
 *.bin
 
 # File JSON e Cache di estrazione
@@ -53,3 +54,7 @@ _prove/
 scratch/
 test_modello/
 **/test_modello/
+
+# Log delle esecuzioni lunghe
+*.log
+nohup.out

@@ -127,32 +127,45 @@ class NeuralInputsVisualizer:
 
     def load_model(self):
         """Carica il checkpoint ufficiale dell'architettura neurale AttentionPerZoneModel."""
+        # Checkpoint dei 3 modelli addestrati, in ordine di preferenza
         ckpt_candidates = [
-            os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
-            os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_geometric.pth"),
-            os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth")
+            ("HYBRID", os.path.join(ROOT_DIR, "pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth")),
+            ("REAL_GT", os.path.join(ROOT_DIR, "pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth")),
+            ("POS_ONLY", os.path.join(ROOT_DIR, "pesi_modelli", "per_zone_checkpoint_attention_positive_only.pth"))
         ]
         ckpt_path = None
-        for p in ckpt_candidates:
+        for m_name, p in ckpt_candidates:
             if os.path.exists(p):
                 ckpt_path = p
                 break
+            print(f"[MANCANTE] Pesi non trovati per {m_name}: {p}")
 
+        # Senza pesi validi la rete resta a pesi random: SE/FiLM/predizioni vanno segnalati come MANCANTI
+        self.pesi_mancanti = True
+        self.ckpt_usato = None
         model = AttentionPerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(self.device)
-        if ckpt_path and os.path.exists(ckpt_path):
+        if ckpt_path:
             try:
                 ckpt = torch.load(ckpt_path, map_location=self.device)
                 state = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
                 model.load_state_dict(state)
-                model.eval()
+                self.pesi_mancanti = False
+                self.ckpt_usato = os.path.basename(ckpt_path)
                 print(f"• Modello neurale caricato con successo da: {ckpt_path}")
             except Exception as e:
                 print(f"[WARN] Errore caricamento checkpoint: {e}")
-                model.eval()
         else:
-            print("[WARN] Checkpoint neurale non trovato. Inizializzazione pesi random.")
-            model.eval()
+            print("[WARN] Nessun checkpoint neurale trovato: pesi SE/FiLM mostrati come MANCANTI.")
+        model.eval()
         return model
+
+    def _disegna_avviso_pesi(self, ax, fontsize=8.0):
+        """Sovrappone un avviso centrato sugli output che dipendono dai pesi del modello."""
+        ax.text(0.5, 0.5, "PESI MANCANTI\n(modello non addestrato: valori non significativi)",
+                transform=ax.transAxes, fontsize=fontsize, fontweight='bold',
+                color='#475569', ha='center', va='center', zorder=40,
+                bbox=dict(boxstyle="round,pad=0.5", facecolor='#F1F5F9',
+                          edgecolor='#64748B', linewidth=1.1, alpha=0.95))
 
     def load_icons(self):
         """Carica le icone vettoriali stilizzate."""
@@ -918,10 +931,12 @@ class NeuralInputsVisualizer:
                 parts = meta['title'].split(':')
                 tag = parts[0].strip()
                 name = parts[1].strip() if len(parts) > 1 else ""
-                ch_title = f"{tag}: {name} [Z{self.selected_zone_idx+1}]\nPatch 64x64 | SE: {w_se:.2f}"
+                se_str = "n/d" if self.pesi_mancanti else f"{w_se:.2f}"
+                ch_title = f"{tag}: {name} [Z{self.selected_zone_idx+1}]\nPatch 64x64 | SE: {se_str}"
                 title_col = '#1D4ED8'
             else:
-                ch_title = f"{meta['title']}\nGlobale 25m | SE: {w_se:.2f}"
+                se_str = "n/d" if self.pesi_mancanti else f"{w_se:.2f}"
+                ch_title = f"{meta['title']}\nGlobale 25m | SE: {se_str}"
                 title_col = '#0F172A'
 
             ax_c.set_title(ch_title, fontsize=7.1, fontweight='bold', color=title_col, pad=3)
@@ -947,6 +962,11 @@ class NeuralInputsVisualizer:
         attn_title = f"Pesi Attention (SE)\nPatch Zona Z{self.selected_zone_idx+1}" if is_local else "Pesi Attention (SE)\nGlobale Frame"
         ax_attn.set_title(attn_title, fontsize=7.2, fontweight='bold', color=('#1D4ED8' if is_local else '#0F172A'), pad=3)
         ax_attn.axvline(0.5, color='#DC2626', linestyle=':', linewidth=0.8, alpha=0.7)
+        if self.pesi_mancanti:
+            ax_attn.text(0.5, 0.5, "PESI\nMANCANTI", transform=ax_attn.transAxes,
+                         fontsize=8.0, fontweight='bold', color='#475569', ha='center', va='center', zorder=40,
+                         bbox=dict(boxstyle="round,pad=0.4", facecolor='#F1F5F9',
+                                   edgecolor='#64748B', linewidth=1.0, alpha=0.95))
 
     def render_mode_auxiliary_network(self):
         """Renderizza la vista Rete Neurale Ausiliaria: Mappa BEV a sinistra + Ispezione MLP/FiLM a destra."""
@@ -1176,6 +1196,11 @@ class NeuralInputsVisualizer:
                                               facecolor=p_bg, edgecolor='#CBD5E1', linewidth=0.8))
             ax_card4.text(0.882, y_r + 0.028, f"Predizione AI: {p_pct:.1f}%",
                           fontsize=7.1, fontweight='bold', color=p_col, ha='center', va='center')
+
+        # MLP, FiLM e predizioni dipendono dai pesi: con pesi mancanti sono valori random
+        if self.pesi_mancanti:
+            for ax in [ax_card2, ax_card3, ax_card4]:
+                self._disegna_avviso_pesi(ax)
 
     def toggle_auxiliary(self, event=None):
         """Attiva o disattiva la visualizzazione della rete ausiliaria."""

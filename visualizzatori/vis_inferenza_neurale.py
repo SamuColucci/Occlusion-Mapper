@@ -56,7 +56,6 @@ MODEL_CONFIGS = {
         "title": "Anticipazione Neuro-Simbolica Ibrida (Spazio 3D + HD-Map)",
         "short": "★ IBRIDO (SPAZIO+HDMAP)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
-        "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_geometric.pth"),
         "badge_color": "#2563EB",
         "badge_bg": "#DBEAFE",
     },
@@ -64,7 +63,6 @@ MODEL_CONFIGS = {
         "title": "Supervisione Geometrica (Fitting 3D)",
         "short": "★ GEOMETRICO (FITTING 3D)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_geometric.pth"),
-        "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
         "badge_color": "#0284C7",
         "badge_bg": "#E0F2FE",
     },
@@ -72,7 +70,6 @@ MODEL_CONFIGS = {
         "title": "Supervisione Semantica (Regole Naïve HD-Map)",
         "short": "★ SEMANTICO (REGOLE HDMAP)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_semantic.pth"),
-        "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
         "badge_color": "#E11D48",
         "badge_bg": "#FFF1F2",
     },
@@ -80,7 +77,6 @@ MODEL_CONFIGS = {
         "title": "Supervisione Reale Completa (nuScenes 3D)",
         "short": "GT REALE (COMPLETA)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth"),
-        "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
         "badge_color": "#0D9488",
         "badge_bg": "#CCFBF1",
     },
@@ -88,7 +84,6 @@ MODEL_CONFIGS = {
         "title": "Supervisione Solo Zone Piene (Positives-Only)",
         "short": "SOLO POSITIVI (ZONE PIENE)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_positive_only.pth"),
-        "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth"),
         "badge_color": "#D97706",
         "badge_bg": "#FEF3C7",
     }
@@ -96,6 +91,21 @@ MODEL_CONFIGS = {
 MODEL_CONFIGS["HYBRID"] = MODEL_CONFIGS["NEURO_SIMB"]
 MODEL_CONFIGS["GEOMETRICA"] = MODEL_CONFIGS["GEOMETRIC"]
 MODEL_CONFIGS["SEMANTICA"] = MODEL_CONFIGS["SEMANTIC"]
+
+
+def percorso_ckpt(model_key):
+    """Restituisce il percorso assoluto del checkpoint del modello (relativo a ROOT_DIR)."""
+    cfg = MODEL_CONFIGS.get(model_key, MODEL_CONFIGS["NEURO_SIMB"])
+    ckpt = cfg.get("ckpt")
+    if not ckpt:
+        return None
+    return ckpt if os.path.isabs(ckpt) else os.path.join(ROOT_DIR, ckpt)
+
+
+def modello_disponibile(model_key):
+    """True se il file dei pesi del modello esiste su disco (nessun fallback su altri modelli)."""
+    p = percorso_ckpt(model_key)
+    return p is not None and os.path.exists(p)
 
 
 class NeuralInferenceVisualizer:
@@ -147,6 +157,7 @@ class NeuralInferenceVisualizer:
 
         # Cache modelli per commutazione istantanea senza rilettura da disco
         self.loaded_models = {}
+        self.missing_reported = set()
         self._preload_model(self.current_model_key)
 
         self.load_icons()
@@ -162,13 +173,12 @@ class NeuralInferenceVisualizer:
         if model_key in self.loaded_models:
             return self.loaded_models[model_key]
 
-        cfg = MODEL_CONFIGS.get(model_key, MODEL_CONFIGS["NEURO_SIMB"])
-        ckpt_path = cfg["ckpt"]
-        if not os.path.exists(ckpt_path) and "fallback" in cfg:
-            ckpt_path = cfg["fallback"]
-
-        if not os.path.exists(ckpt_path):
-            print(f"[ATTENZIONE] Checkpoint non trovato: {ckpt_path}. Uso fallback o modello random.")
+        # Pesi mancanti: il modello e' segnalato come MANCANTE (nessun fallback su altri checkpoint)
+        ckpt_path = percorso_ckpt(model_key)
+        if not modello_disponibile(model_key):
+            if model_key not in self.missing_reported:
+                print(f"[MANCANTE] Pesi non trovati per {model_key}: {ckpt_path}")
+                self.missing_reported.add(model_key)
             return None
 
         model = AttentionPerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(self.device)
@@ -795,6 +805,15 @@ class NeuralInferenceVisualizer:
         # Ego Vehicle al centro
         self.draw_icon_object(ax_map, 'car_ego', center=[0.0, 0.0], length=5.0, deg=0.0)
 
+        # Avviso centrato sulla BEV se i pesi del modello attivo non esistono
+        if not modello_disponibile(self.current_model_key):
+            ckpt_nome = os.path.basename(percorso_ckpt(self.current_model_key) or "")
+            ax_map.text(0.5, 0.5, f"Pesi del modello mancanti:\n{ckpt_nome}",
+                        transform=ax_map.transAxes, fontsize=11, fontweight='bold',
+                        color='#475569', ha='center', va='center', zorder=40,
+                        bbox=dict(boxstyle="round,pad=0.6", facecolor='#F1F5F9',
+                                  edgecolor='#64748B', linewidth=1.2, alpha=0.95))
+
         # Tooltip interattivo per dettagli inferenza zona
         self.tooltip = ax_map.annotate(
             "", xy=(0, 0), xytext=(15, 15), textcoords="offset points",
@@ -831,11 +850,18 @@ class NeuralInferenceVisualizer:
         badge_bg = cfg_curr.get("badge_bg", "#DBEAFE")
         badge_col = cfg_curr.get("badge_color", "#2563EB")
         badge_short = cfg_curr.get("short", self.current_model_key)
+        pesi_ok = modello_disponibile(self.current_model_key)
+        if pesi_ok:
+            badge_txt = f"MODELLO ATTIVO: {badge_short} (ATTENTION)"
+        else:
+            # Stile neutro grigio per segnalare i pesi mancanti
+            badge_bg, badge_col = "#F1F5F9", "#64748B"
+            badge_txt = f"MODELLO ATTIVO: {badge_short} — PESI MANCANTI"
 
         ax_telemetry.add_patch(FancyBboxPatch((0.28, 0.63), 0.66, 0.17, boxstyle="round,pad=0.015,rounding_size=0.03",
                                               transform=ax_telemetry.transAxes,
                                               facecolor=badge_bg, edgecolor=badge_col, linewidth=1.1, zorder=3))
-        ax_telemetry.text(0.61, 0.715, f"MODELLO ATTIVO: {badge_short} (ATTENTION)",
+        ax_telemetry.text(0.61, 0.715, badge_txt,
                           transform=ax_telemetry.transAxes,
                           fontsize=8.2, fontweight='bold', color=badge_col, ha='center', va='center')
 
@@ -1056,6 +1082,10 @@ class NeuralInferenceVisualizer:
             prefix = " ●  " if is_active else " ○  "
             bg_col = '#EFF6FF' if is_active else '#FFFFFF'
             txt_col = '#1D4ED8' if is_active else '#334155'
+            # Modelli senza pesi: restano selezionabili ma marcati in grigio
+            if not modello_disponibile(m_key):
+                m_lbl = m_lbl + "  [MANCANTE]"
+                txt_col = '#94A3B8'
 
             ax_item = self.fig.add_axes([0.567, 0.748 + y_off, 0.276, 0.035], zorder=101)
             btn = Button(ax_item, prefix + m_lbl, color=bg_col, hovercolor='#E0F2FE')

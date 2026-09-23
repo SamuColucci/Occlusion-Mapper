@@ -248,7 +248,10 @@ def genera_campioni_fotogramma(idx: int):
             masks_list.append(occ_mask_t)
             targets_list.append(target)
 
-    return patches_list, scalars_list, masks_list, targets_list
+    # I tensori vengono restituiti come array NumPy: un tensore PyTorch passato fra processi
+    # viene condiviso tramite una mmap dedicata, e le decine di migliaia di zone di un blocco
+    # superano il limite del sistema (vm.max_map_count), bloccando il pool
+    return tuple([t.numpy() for t in lista] for lista in (patches_list, scalars_list, masks_list, targets_list))
 
 
 # Elenco ordinato dei blocchi di cache presenti sul disco
@@ -344,7 +347,7 @@ def genera_blocchi(cartella: str, gt_mode: str, split: str, workers: int) -> Non
     with Pool(processes=workers, initializer=init_worker_training, initargs=(adapter, GT_MODE)) as pool:
         for n, risultato in enumerate(pool.imap(genera_campioni_fotogramma, indici, chunksize=8), start=1):
             for destinazione, prodotte in zip(buffer, risultato):
-                destinazione.extend(prodotte)
+                destinazione.extend(torch.from_numpy(x) for x in prodotte)
             fotogrammi_nel_blocco += 1
 
             if fotogrammi_nel_blocco >= FOTOGRAMMI_PER_BLOCCO and buffer[0]:
@@ -362,7 +365,7 @@ def genera_blocchi(cartella: str, gt_mode: str, split: str, workers: int) -> Non
     print(f"• Cache scritta in {cartella}: {len(elenco_blocchi(cartella))} blocchi, {totale_zone} zone")
 
 
-def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometric", checkpoint_path=None, split="train", force_extract=False, workers=8):
+def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometric", checkpoint_path=None, split="train", force_extract=False, workers=8, cache_dir="addestramento", pesi_dir="pesi_modelli"):
     """
     Funzione di addestramento universale.
     Supporta:
@@ -379,7 +382,7 @@ def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometri
         print("=" * 80)
         modes_to_train = ["geometric", "semantic", "hybrid", "real", "positives_only"]
         for m in modes_to_train:
-            train_attention_neuro(epochs=epochs, batch_size=batch_size, lr=lr, gt_mode=m, split=split, force_extract=force_extract, workers=workers)
+            train_attention_neuro(epochs=epochs, batch_size=batch_size, lr=lr, gt_mode=m, split=split, force_extract=force_extract, workers=workers, cache_dir=cache_dir, pesi_dir=pesi_dir)
         print("\n[COMPLETATO] Addestramento sequenziale di tutti i modelli terminato con successo!")
         return
 
@@ -388,13 +391,13 @@ def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometri
     # Mappatura automatica dei percorsi checkpoint
     if checkpoint_path is None:
         ckpt_map = {
-            "geometric": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_geometric.pth"),
-            "semantic": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_semantic.pth"),
-            "hybrid": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
-            "real": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth"),
-            "positives_only": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_positive_only.pth"),
+            "geometric": os.path.join(pesi_dir, "per_zone_checkpoint_attention_neuro_geometric.pth"),
+            "semantic": os.path.join(pesi_dir, "per_zone_checkpoint_attention_neuro_semantic.pth"),
+            "hybrid": os.path.join(pesi_dir, "per_zone_checkpoint_attention_neuro_hybrid.pth"),
+            "real": os.path.join(pesi_dir, "per_zone_checkpoint_attention_real_gt.pth"),
+            "positives_only": os.path.join(pesi_dir, "per_zone_checkpoint_attention_positive_only.pth"),
         }
-        checkpoint_path = ckpt_map.get(gt_mode, os.path.join("pesi_modelli", f"per_zone_checkpoint_attention_{gt_mode}.pth"))
+        checkpoint_path = ckpt_map.get(gt_mode, os.path.join(pesi_dir, f"per_zone_checkpoint_attention_{gt_mode}.pth"))
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 
@@ -409,9 +412,9 @@ def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometri
     # Gestione Cache differenziata per modalità e split
     split_suffix = f"_{split}" if split != "all" else ""
     if gt_mode in ["real", "positives_only"]:
-        cache_path = os.path.join("addestramento", f"cached_dataset_per_zone{split_suffix}.pth")
+        cache_path = os.path.join(cache_dir, f"cached_dataset_per_zone{split_suffix}.pth")
     else:
-        cache_path = os.path.join("addestramento", f"cached_dataset_neuro_{gt_mode}{split_suffix}.pth")
+        cache_path = os.path.join(cache_dir, f"cached_dataset_neuro_{gt_mode}{split_suffix}.pth")
 
     # La cache e' suddivisa in blocchi su disco: l'intero dataset non entrerebbe in memoria
     cartella_blocchi = cache_path.replace(".pth", "_blocchi")
@@ -491,7 +494,7 @@ def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometri
 
     # Se geometric, aggiorna anche il default del repository
     if gt_mode == "geometric":
-        default_ckpt = os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro.pth")
+        default_ckpt = os.path.join(pesi_dir, "per_zone_checkpoint_attention_neuro.pth")
         torch.save(ckpt_dict, default_ckpt)
         print(f"[OK] Pesi standard aggiornati in: {default_ckpt}")
 
@@ -510,7 +513,12 @@ if __name__ == "__main__":
     parser.add_argument("--split", type=str, default="train", choices=["train", "val", "all"],
                         help="Split nuScenes: 'train' (700 scene, default), 'val' (150 scene) o 'all' (850 scene)")
     parser.add_argument("--force", "--force_extract", dest="force", action="store_true", help="Forza la rigenerazione della cache dataset da zero")
+    parser.add_argument("--cache_dir", type=str, default="addestramento",
+                        help="Cartella in cui salvare i blocchi della cache (default: addestramento/). "
+                             "Su trainval la cache occupa ~100 GB per modalita', puo' servire un disco esterno")
+    parser.add_argument("--pesi_dir", type=str, default="pesi_modelli",
+                        help="Cartella in cui salvare i checkpoint addestrati (default: pesi_modelli/)")
     args = parser.parse_args()
 
     train_attention_neuro(epochs=args.epochs, batch_size=args.batch_size, gt_mode=args.mode, split=args.split,
-                          force_extract=args.force, workers=args.workers)
+                          force_extract=args.force, workers=args.workers, cache_dir=args.cache_dir, pesi_dir=args.pesi_dir)

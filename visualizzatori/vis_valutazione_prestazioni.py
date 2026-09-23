@@ -60,7 +60,6 @@ MODEL_CONFIGS = {
         "title": "Anticipazione Neuro-Simbolica (Spazio 3D + Mappa HD)",
         "short": "★ NEURO-SIMB.",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
-        "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_geometric.pth"),
         "badge_color": "#2563EB",
         "badge_bg": "#DBEAFE",
     },
@@ -68,7 +67,6 @@ MODEL_CONFIGS = {
         "title": "Supervisione Reale Completa (nuScenes 3D)",
         "short": "GT REALE",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth"),
-        "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
         "badge_color": "#0D9488",
         "badge_bg": "#CCFBF1",
     },
@@ -76,7 +74,6 @@ MODEL_CONFIGS = {
         "title": "Supervisione Solo Zone Piene (Positives-Only)",
         "short": "SOLO POSITIVI",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_positive_only.pth"),
-        "fallback": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth"),
         "badge_color": "#D97706",
         "badge_bg": "#FEF3C7",
     },
@@ -90,6 +87,23 @@ MODEL_CONFIGS = {
 }
 # Alias per retrocompatibilità
 MODEL_CONFIGS["HYBRID"] = MODEL_CONFIGS["NEURO_SIMB"]
+
+
+def percorso_ckpt(model_key):
+    """Restituisce il percorso assoluto del checkpoint del modello (None per la baseline BAYES)."""
+    cfg = MODEL_CONFIGS.get(model_key)
+    ckpt = cfg.get("ckpt") if cfg else None
+    if not ckpt:
+        return None
+    return ckpt if os.path.isabs(ckpt) else os.path.join(ROOT_DIR, ckpt)
+
+
+def modello_disponibile(model_key):
+    """True se i pesi del modello esistono su disco (BAYES è analitico: sempre disponibile)."""
+    if model_key == "BAYES":
+        return True
+    p = percorso_ckpt(model_key)
+    return p is not None and os.path.exists(p)
 
 GT_CONFIGS = {
     "NEURO_SIMB": {
@@ -205,6 +219,7 @@ class EvaluationDashboardVisualizer:
 
         # Cache modelli neurali
         self.loaded_models = {}
+        self.missing_reported = set()
         self._preload_model(self.current_model_key)
         self._preload_model(self.cmp_model_a_key)
         self._preload_model(self.cmp_model_b_key)
@@ -274,15 +289,12 @@ class EvaluationDashboardVisualizer:
         if model_key in self.loaded_models:
             return self.loaded_models[model_key]
 
-        cfg = MODEL_CONFIGS.get(model_key, MODEL_CONFIGS["HYBRID"])
-        ckpt_path = cfg.get("ckpt")
-        if not ckpt_path:
-            return None
-        if not os.path.exists(ckpt_path) and "fallback" in cfg:
-            ckpt_path = cfg["fallback"]
-
-        if not os.path.exists(ckpt_path):
-            print(f"[ATTENZIONE] Checkpoint non trovato: {ckpt_path}")
+        # Pesi mancanti: il modello e' MANCANTE (nessun fallback su altri checkpoint)
+        ckpt_path = percorso_ckpt(model_key)
+        if not modello_disponibile(model_key):
+            if model_key not in self.missing_reported:
+                print(f"[MANCANTE] Pesi non trovati per {model_key}: {ckpt_path}")
+                self.missing_reported.add(model_key)
             return None
 
         model = AttentionPerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(self.device)
@@ -293,6 +305,37 @@ class EvaluationDashboardVisualizer:
         self.loaded_models[model_key] = model
         print(f"• Modello [{model_key}] caricato con successo da: {ckpt_path}")
         return model
+
+    def _cache_ha_modello(self, model_key, gt_key, idx=None):
+        """True se la cache ufficiale contiene risultati per modello/GT (frame idx, o almeno un frame se idx=None)."""
+        if not self.eval_cache or "frames" not in self.eval_cache:
+            return False
+        m_k = "NEURO_SIMB" if model_key in ["HYBRID", "NEURO_SIMB"] else model_key
+        g_k = "NEURO_SIMB" if gt_key in ["HYBRID", "NEURO_SIMB"] else gt_key
+        frames_cache = self.eval_cache["frames"]
+        if idx is not None:
+            frames_iter = [frames_cache.get(str(idx)) or {}]
+        else:
+            frames_iter = frames_cache.values()
+        for f_data in frames_iter:
+            if g_k in f_data.get("models", {}).get(m_k, {}):
+                return True
+        return False
+
+    def modello_mancante(self, model_key, gt_key):
+        """True se il modello non ha pesi su disco e nemmeno risultati in cache per il frame corrente."""
+        if modello_disponibile(model_key):
+            return False
+        return not self._cache_ha_modello(model_key, gt_key, self.current_idx)
+
+    def _disegna_avviso_mancante(self, ax, model_key):
+        """Avviso centrato sulla BEV quando i pesi del modello non esistono."""
+        ckpt_nome = os.path.basename(percorso_ckpt(model_key) or model_key)
+        ax.text(0.5, 0.5, f"Pesi del modello mancanti:\n{ckpt_nome}",
+                transform=ax.transAxes, fontsize=11, fontweight='bold',
+                color='#475569', ha='center', va='center', zorder=40,
+                bbox=dict(boxstyle="round,pad=0.6", facecolor='#F1F5F9',
+                          edgecolor='#64748B', linewidth=1.2, alpha=0.95))
 
     def load_icons(self):
         icons_dir = os.path.join(os.path.dirname(__file__), "assets", "icons")
@@ -1162,6 +1205,9 @@ class EvaluationDashboardVisualizer:
         # 1. PANNELLO SINISTRO: MAPPA BEV AD ALTA FEDELTÀ (25M)
         # =====================================================================
         self.drawn_occlusions = self.draw_bev_map(ax_map, self.inferred_occlusions, is_interactive=True)
+        main_mancante = self.modello_mancante(self.current_model_key, self.current_gt_key)
+        if main_mancante:
+            self._disegna_avviso_mancante(ax_map, self.current_model_key)
 
         # Tooltip interattivo
         self.tooltip = ax_map.annotate(
@@ -1203,6 +1249,10 @@ class EvaluationDashboardVisualizer:
             is_act = (self.current_model_key == m_k)
             bg_c = '#1D4ED8' if is_act else '#E2E8F0'
             tx_c = '#FFFFFF' if is_act else '#1E293B'
+            # Modelli senza pesi: selezionabili ma in grigio
+            if self.modello_mancante(m_k, self.current_gt_key):
+                bg_c = '#64748B' if is_act else '#F1F5F9'
+                tx_c = '#FFFFFF' if is_act else '#94A3B8'
 
             bbox_btn = ax_config.get_position()
             # Conversione coordinate da transAxes a transFigure
@@ -1290,8 +1340,13 @@ class EvaluationDashboardVisualizer:
 
         # Scorecard badge F1 Frame in alto nel grafico
         f1_col = '#15803D' if self.f1_glob >= 70.0 else ('#B45309' if self.f1_glob >= 50.0 else '#B91C1C')
-        ax_metrics.set_title(f"Scorecard Frame: F1={self.f1_glob:.1f}%  |  Recall={self.rec_glob:.1f}%  |  Precision={self.prec_glob:.1f}%",
-                             fontsize=9.2, fontweight='bold', pad=8, color=f1_col)
+        score_txt = f"Scorecard Frame: F1={self.f1_glob:.1f}%  |  Recall={self.rec_glob:.1f}%  |  Precision={self.prec_glob:.1f}%"
+        if main_mancante:
+            # Nessuna metrica fittizia a 0%: il modello e' segnalato come mancante
+            short_m = MODEL_CONFIGS.get(self.current_model_key, {}).get("short", self.current_model_key)
+            score_txt = f"Scorecard Frame: {short_m} — PESI MANCANTI (metriche non disponibili)"
+            f1_col = '#64748B'
+        ax_metrics.set_title(score_txt, fontsize=9.2, fontweight='bold', pad=8, color=f1_col)
         ax_metrics.grid(axis='y', color='#E2E8F0', linestyle='-', linewidth=0.7, zorder=1)
         ax_metrics.legend(loc='upper right', framealpha=0.92, fontsize=7.5, ncol=3)
 
@@ -1561,6 +1616,9 @@ class EvaluationDashboardVisualizer:
             is_act = (self.cmp_model_a_key == m_k)
             bg_c = '#2563EB' if is_act else '#E2E8F0'
             tx_c = '#FFFFFF' if is_act else '#1E293B'
+            if self.modello_mancante(m_k, self.cmp_gt_key):
+                bg_c = '#64748B' if is_act else '#F1F5F9'
+                tx_c = '#FFFFFF' if is_act else '#94A3B8'
 
             ax_btn = self.fig_cmp.add_axes([x_pos, 0.900, w_btn, 0.027])
             btn = Button(ax_btn, m_lbl, color=bg_c, hovercolor='#93C5FD' if not is_act else bg_c)
@@ -1582,6 +1640,9 @@ class EvaluationDashboardVisualizer:
             is_act = (self.cmp_model_b_key == m_k)
             bg_c = '#7C3AED' if is_act else '#E2E8F0'
             tx_c = '#FFFFFF' if is_act else '#1E293B'
+            if self.modello_mancante(m_k, self.cmp_gt_key):
+                bg_c = '#64748B' if is_act else '#F1F5F9'
+                tx_c = '#FFFFFF' if is_act else '#94A3B8'
 
             ax_btn = self.fig_cmp.add_axes([x_pos, 0.900, w_btn, 0.027])
             btn = Button(ax_btn, m_lbl, color=bg_c, hovercolor='#DDD6FE' if not is_act else bg_c)
@@ -1603,23 +1664,30 @@ class EvaluationDashboardVisualizer:
         cfg_a = MODEL_CONFIGS.get(self.cmp_model_a_key, MODEL_CONFIGS["NEURO_SIMB"])
         cfg_b = MODEL_CONFIGS.get(self.cmp_model_b_key, MODEL_CONFIGS["REAL_GT"])
 
+        mancante_a = self.modello_mancante(self.cmp_model_a_key, self.cmp_gt_key)
+        mancante_b = self.modello_mancante(self.cmp_model_b_key, self.cmp_gt_key)
+
         self.draw_bev_map(ax_map_a, occs_a,
-                          title=f"MAPPA A: {cfg_a['title']}",
-                          badge_text=f"F1: {f1_a:.1f}%  |  Rec: {rec_a:.1f}%",
-                          badge_bg='#2563EB')
+                          title=f"MAPPA A: {cfg_a['title']}" + ("  [MANCANTE]" if mancante_a else ""),
+                          badge_text="PESI MANCANTI" if mancante_a else f"F1: {f1_a:.1f}%  |  Rec: {rec_a:.1f}%",
+                          badge_bg='#64748B' if mancante_a else '#2563EB')
+        if mancante_a:
+            self._disegna_avviso_mancante(ax_map_a, self.cmp_model_a_key)
 
         self.draw_bev_map(ax_map_b, occs_b,
-                          title=f"MAPPA B: {cfg_b['title']}",
-                          badge_text=f"F1: {f1_b:.1f}%  |  Rec: {rec_b:.1f}%",
-                          badge_bg='#7C3AED')
+                          title=f"MAPPA B: {cfg_b['title']}" + ("  [MANCANTE]" if mancante_b else ""),
+                          badge_text="PESI MANCANTI" if mancante_b else f"F1: {f1_b:.1f}%  |  Rec: {rec_b:.1f}%",
+                          badge_bg='#64748B' if mancante_b else '#7C3AED')
+        if mancante_b:
+            self._disegna_avviso_mancante(ax_map_b, self.cmp_model_b_key)
 
         # Card Metriche Mappa A
         self._render_cmp_card(ax_card_a, "MAPPA A", cfg_a["title"],
-                              f1_a, rec_a, prec_a, stats_a, lat_a, '#2563EB')
+                              f1_a, rec_a, prec_a, stats_a, lat_a, '#2563EB', mancante=mancante_a)
 
         # Card Metriche Mappa B
         self._render_cmp_card(ax_card_b, "MAPPA B", cfg_b["title"],
-                              f1_b, rec_b, prec_b, stats_b, lat_b, '#7C3AED')
+                              f1_b, rec_b, prec_b, stats_b, lat_b, '#7C3AED', mancante=mancante_b)
 
         # Banner Delta Confronto Diretto in basso
         delta_f1 = f1_a - f1_b
@@ -1627,7 +1695,13 @@ class EvaluationDashboardVisualizer:
         delta_tp = sum(stats_a[c]['tp'] for c in range(4)) - sum(stats_b[c]['tp'] for c in range(4))
         delta_fn = sum(stats_a[c]['fn'] for c in range(4)) - sum(stats_b[c]['fn'] for c in range(4))
 
-        if delta_f1 > 0:
+        if mancante_a or mancante_b:
+            # Confronto non significativo se almeno un modello non ha pesi
+            winner_txt = "Confronto non disponibile: pesi mancanti per " + \
+                " e ".join(t for t, m in (("Mappa A", mancante_a), ("Mappa B", mancante_b)) if m)
+            d_col = '#475569'
+            bg_d = '#F1F5F9'
+        elif delta_f1 > 0:
             winner_txt = f"Mappa A supera Mappa B (+{delta_f1:.1f}% F1)"
             d_col = '#15803D'
             bg_d = '#F0FDF4'
@@ -1652,7 +1726,7 @@ class EvaluationDashboardVisualizer:
 
         self.fig_cmp.canvas.draw_idle()
 
-    def _render_cmp_card(self, ax, tag, model_title, f1, rec, prec, stats, latency, theme_color):
+    def _render_cmp_card(self, ax, tag, model_title, f1, rec, prec, stats, latency, theme_color, mancante=False):
         """Renderizza la card riassuntiva di performance per un modello nella finestra di confronto."""
         c_border = '#0F172A'
         ax.set_facecolor('#F8FAFC')
@@ -1660,6 +1734,18 @@ class EvaluationDashboardVisualizer:
             spine.set_color(c_border); spine.set_linewidth(1.1)
         ax.set_xlim(0, 1); ax.set_ylim(0, 1)
         ax.set_xticks([]); ax.set_yticks([])
+
+        # Modello senza pesi: card neutra grigia al posto di metriche fittizie a 0%
+        if mancante:
+            ax.add_patch(Rectangle((0.025, 0.10), 0.22, 0.80, transform=ax.transAxes,
+                                    facecolor='#F1F5F9', edgecolor='#64748B', linewidth=1.2, zorder=2))
+            ax.text(0.135, 0.50, "MANCANTE", transform=ax.transAxes,
+                    fontsize=12.0, fontweight='bold', color='#64748B', ha='center', va='center')
+            ax.text(0.28, 0.72, f"{tag}: {model_title}", transform=ax.transAxes,
+                    fontsize=8.2, fontweight='bold', color='#64748B')
+            ax.text(0.28, 0.42, "PESI MANCANTI: metriche non disponibili per questo modello",
+                    transform=ax.transAxes, fontsize=8.0, color='#475569')
+            return
 
         # Box F1 grande
         f1_col = '#15803D' if f1 >= 70.0 else ('#B45309' if f1 >= 50.0 else '#B91C1C')
@@ -1807,6 +1893,9 @@ class EvaluationDashboardVisualizer:
             is_m = (self.recap_model_key == mk)
             bg_c = '#2563EB' if is_m else '#F1F5F9'
             tx_c = '#FFFFFF' if is_m else '#1E293B'
+            if not self._cache_ha_modello(mk, self.recap_gt_key):
+                bg_c = '#64748B' if is_m else '#F1F5F9'
+                tx_c = '#FFFFFF' if is_m else '#94A3B8'
             ax_m = self.fig_recap.add_axes([mx, 0.902, mw, 0.028])
             btn_m = Button(ax_m, mlbl, color=bg_c, hovercolor='#93C5FD' if not is_m else bg_c)
             btn_m.label.set_fontsize(7.2); btn_m.label.set_fontweight('bold'); btn_m.label.set_color(tx_c)
@@ -1833,6 +1922,8 @@ class EvaluationDashboardVisualizer:
 
         # Calcolo aggregato
         tr_res, val_res = self.compute_split_aggregates(self.recap_model_key, self.recap_gt_key)
+        # Il recap legge solo dalla cache: senza dati per il modello scelto e' MANCANTE
+        recap_mancante = not self._cache_ha_modello(self.recap_model_key, self.recap_gt_key)
 
         # Layout 2 Colonne (Sinistra: TRAIN | Destra: VAL)
         gs = GridSpec(2, 2, figure=self.fig_recap, left=0.03, right=0.97, bottom=0.08, top=0.87,
@@ -1865,6 +1956,9 @@ class EvaluationDashboardVisualizer:
 
             # Statistiche dettagliate
             tag_badge = "★ DATI INEDITI (GENERALIZZAZIONE)" if is_val else "DATI VISTI (ADDESTRAMENTO)"
+            if recap_mancante:
+                tag_badge = "MODELLO MANCANTE (nessun risultato in cache)"
+                theme_color = '#64748B'
             ax_kpi.text(0.27, 0.80, f"{tag}: {title} ({num_frames} Fotogrammi)", transform=ax_kpi.transAxes,
                         fontsize=8.5, fontweight='bold', color=theme_color)
             ax_kpi.text(0.27, 0.56, f"Recall Globale: {res['rec']:.1f}%   |   Precision Globale: {res['prec']:.1f}%",
@@ -1947,7 +2041,10 @@ class EvaluationDashboardVisualizer:
         d_rec = val_res['rec'] - tr_res['rec']
         d_prec = val_res['prec'] - tr_res['prec']
 
-        if abs(d_f1) <= 3.0:
+        if recap_mancante:
+            comm = "Modello MANCANTE: nessun risultato in cache per il modello/GT selezionati."
+            b_col = '#475569'; b_bg = '#F1F5F9'
+        elif abs(d_f1) <= 3.0:
             comm = "Overfitting Nullo: perfetta coerenza delle predizioni tra scene viste e inedite."
             b_col = '#15803D'; b_bg = '#F0FDF4'
         elif d_f1 > 0:
