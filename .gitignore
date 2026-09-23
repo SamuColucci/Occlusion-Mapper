@@ -28,6 +28,10 @@ extracted_occlusions_temporal/
 *.xlsx
 *.csv
 
+# Eccezioni: icone e asset grafici essenziali dei visualizzatori
+!visualizzatori/assets/
+!visualizzatori/assets/**
+
 # Cache di Python
 __pycache__/
 *.pyc
