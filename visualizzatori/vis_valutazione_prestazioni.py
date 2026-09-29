@@ -149,12 +149,15 @@ def to_macro_classes_4(arr_6):
 
 
 class EvaluationDashboardVisualizer:
-    def __init__(self, max_range=25.0, initial_model="NEURO_SIMB", initial_gt="NEURO_SIMB"):
+    def __init__(self, max_range=25.0, initial_model="NEURO_SIMB", initial_gt="NEURO_SIMB",
+                 cache_path=None, headless=False):
         print("\n" + "=" * 80)
         print("   VISUALIZZATORE TESI: DASHBOARD PRESTAZIONI & METRICHE UFFICIALI (BEV 25M)")
         print("=" * 80)
 
         self.max_range = float(max_range)
+        self.cache_path_forzato = cache_path
+        self.headless = headless
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"• Dispositivo di Calcolo: {self.device}")
 
@@ -227,26 +230,48 @@ class EvaluationDashboardVisualizer:
         self.load_icons()
         self.load_frame(self.current_idx, broadcast=False)
 
-        # Timer sincronizzazione bidirezionale
-        self.sync_timer = self.fig.canvas.new_timer(interval=150)
-        self.sync_timer.add_callback(self.check_sync_file)
-        self.sync_timer.start()
+        # Timer sincronizzazione bidirezionale (non avviato in modalita' headless/export)
+        self.sync_timer = None
+        if not self.headless:
+            self.sync_timer = self.fig.canvas.new_timer(interval=150)
+            self.sync_timer.add_callback(self.check_sync_file)
+            self.sync_timer.start()
 
     def _load_or_generate_eval_cache(self):
-        """Carica la cache di valutazione JSON precalcolata; se non esiste, la genera invocando evaluate_final_official.py."""
-        cache_path = os.path.join(ROOT_DIR, "valutazione", "cache_valutazione_ufficiale.json")
-        if not os.path.exists(cache_path):
-            cache_path = os.path.join(ROOT_DIR, "valutazione", "cache_valutazione_all.json")
+        """Carica la cache di valutazione JSON precalcolata (la piu' recente tra quelle presenti,
+        oppure quella forzata con --cache); se non ne esiste nessuna, la genera invocando evaluate_final_official.py."""
+        eval_dir = os.path.join(ROOT_DIR, "valutazione")
+        cache_path = None
 
-        if not os.path.exists(cache_path):
+        if self.cache_path_forzato:
+            # Cache forzata da riga di comando (--cache PATH)
+            cache_path = os.path.abspath(self.cache_path_forzato)
+            if not os.path.exists(cache_path):
+                print(f"[ERRORE] Cache indicata con --cache non trovata: {cache_path}")
+                return None
+            print(f"• Cache di valutazione forzata da riga di comando: {cache_path}")
+        else:
+            # Tra le cache presenti sceglie quella modificata piu' di recente
+            candidati = [os.path.join(eval_dir, n) for n in
+                         ("cache_valutazione_ufficiale.json", "cache_valutazione_val.json", "cache_valutazione_all.json")]
+            presenti = [p for p in candidati if os.path.exists(p)]
+            if presenti:
+                presenti.sort(key=os.path.getmtime, reverse=True)
+                cache_path = presenti[0]
+                print("• Cache di valutazione disponibili (dalla piu' recente):")
+                for p in presenti:
+                    ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
+                    print(f"   {'->' if p == cache_path else '  '} {os.path.basename(p)}  ({ts})")
+
+        if cache_path is None:
             print("\n" + "=" * 80)
             print(" [CACHE NON TROVATA]: Generazione automatica cache con evaluate_final_official.py...")
             print("=" * 80)
-            eval_script = os.path.join(ROOT_DIR, "valutazione", "evaluate_final_official.py")
+            eval_script = os.path.join(eval_dir, "evaluate_final_official.py")
             try:
                 import subprocess
                 subprocess.run([sys.executable, eval_script, "--mode", "all", "--split", "all"], check=True)
-                cache_path = os.path.join(ROOT_DIR, "valutazione", "cache_valutazione_ufficiale.json")
+                cache_path = os.path.join(eval_dir, "cache_valutazione_ufficiale.json")
             except Exception as e:
                 print(f"[ERRORE GENERAZIONE CACHE]: {e}")
                 return None
@@ -270,13 +295,13 @@ class EvaluationDashboardVisualizer:
                         print(f"   - {c}")
                     print(" Per ricalcolare il benchmark con i nuovi pesi esegui:")
                     print("   python valutazione/evaluate_final_official.py --mode all --split all")
-                    print(" Oppure elimina cache_valutazione_ufficiale.json per rigenerarla all'avvio.")
+                    print(f" Cache in uso: {os.path.basename(cache_path)}")
                     print("!" * 80 + "\n")
 
                 with open(cache_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 num_frames = len(data.get("frames", {}))
-                print(f"• Cache Valutazione caricata: {num_frames} fotogrammi memorizzati da {os.path.basename(cache_path)}")
+                print(f"• [CACHE CARICATA]: {cache_path}  ({num_frames} fotogrammi memorizzati)")
                 return data
             except Exception as e:
                 print(f"[ATTENZIONE] Impossibile leggere la cache: {e}")
@@ -1155,8 +1180,9 @@ class EvaluationDashboardVisualizer:
         split_bg = "#FEF3C7" if is_val else "#EFF6FF"
         split_fg = "#92400E" if is_val else "#1E40AF"
         split_edge = "#F59E0B" if is_val else "#3B82F6"
-        self.fig.text(0.355, 0.957, split_lbl,
-                      fontsize=8.0, fontweight='bold', color=split_fg, ha='center', va='center',
+        # Badge ancorato a sinistra subito dopo il titolo (evita la sovrapposizione col titolo)
+        self.fig.text(0.333, 0.957, split_lbl,
+                      fontsize=8.0, fontweight='bold', color=split_fg, ha='left', va='center',
                       bbox=dict(boxstyle='round,pad=0.28', facecolor=split_bg, edgecolor=split_edge, linewidth=1.1))
 
         # Filtro Navigazione: Tutti vs Solo VAL
@@ -1464,7 +1490,8 @@ class EvaluationDashboardVisualizer:
 
     def toggle_nav_filter(self, event=None):
         self.nav_val_only = not self.nav_val_only
-        st = "SOLO VAL (81 Frame Inediti)" if self.nav_val_only else "TUTTI I FRAME (404)"
+        st = (f"SOLO VAL ({len(self.val_indices)} Frame Inediti)" if self.nav_val_only
+              else f"TUTTI I FRAME ({self.total_frames})")
         print(f"\n>>> [FILTRO SPLIT NAVIGAZIONE] Attivo: {st}")
         if self.nav_val_only and self.current_idx not in self.val_indices:
             next_vals = [i for i in self.val_indices if i >= self.current_idx]
@@ -1527,7 +1554,8 @@ class EvaluationDashboardVisualizer:
             plt.figure(self.fig_cmp.number)
 
         self.render_comparison_window()
-        plt.show(block=False)
+        if not self.headless:
+            plt.show(block=False)
 
     def render_comparison_window(self):
         """Disegna il confronto side-by-side tra Modello Mappa A e Modello Mappa B."""
@@ -1798,7 +1826,8 @@ class EvaluationDashboardVisualizer:
             plt.figure(self.fig_recap.number)
 
         self.render_global_recap_window()
-        plt.show(block=False)
+        if not self.headless:
+            plt.show(block=False)
 
     def select_recap_model(self, model_key):
         if model_key != self.recap_model_key:
@@ -1811,7 +1840,8 @@ class EvaluationDashboardVisualizer:
             self.render_global_recap_window()
 
     def compute_split_aggregates(self, model_key, gt_key):
-        """Aggrega metriche globali per classe su TRAIN (323 frame) e VAL (81 frame) dalla cache precalcolata."""
+        """Aggrega metriche globali per classe su TRAIN e VAL dalla cache precalcolata.
+        Restituisce anche quanti frame di ciascuno split sono effettivamente presenti in cache per modello/GT."""
         m_k = "NEURO_SIMB" if model_key in ["HYBRID", "NEURO_SIMB"] else model_key
         g_k = "NEURO_SIMB" if gt_key in ["HYBRID", "NEURO_SIMB"] else gt_key
 
@@ -1820,15 +1850,24 @@ class EvaluationDashboardVisualizer:
 
         train_stats = empty_stats()
         val_stats = empty_stats()
+        # Frame dello split effettivamente valutati (presenti in cache per modello/GT)
+        n_train, n_val = 0, 0
+        val_set = set(self.val_indices)
 
         if self.eval_cache and "frames" in self.eval_cache:
             fc = self.eval_cache["frames"]
             for idx_str, f_data in fc.items():
                 idx = int(idx_str)
-                is_val = idx in self.val_indices
-                curr_dict = val_stats if is_val else train_stats
+                is_val = idx in val_set
 
                 m_data = f_data.get("models", {}).get(m_k, {})
+                if g_k not in m_data:
+                    continue
+                if is_val:
+                    n_val += 1
+                else:
+                    n_train += 1
+                curr_dict = val_stats if is_val else train_stats
                 g_data = m_data.get(g_k, {})
                 st = g_data.get("stats", {})
                 for c in range(4):
@@ -1861,7 +1900,10 @@ class EvaluationDashboardVisualizer:
 
             return {"tp": t_tp, "fp": t_fp, "fn": t_fn, "gt": t_gt, "prec": prec, "rec": rec, "f1": f1, "per_class": per_class}
 
-        return calc_metrics(train_stats), calc_metrics(val_stats)
+        tr_res, val_res = calc_metrics(train_stats), calc_metrics(val_stats)
+        tr_res["n_frames"] = n_train
+        val_res["n_frames"] = n_val
+        return tr_res, val_res
 
     def render_global_recap_window(self):
         """Renderizza la finestra di benchmark divisa a metà: Colonna TRAIN e Colonna VAL."""
@@ -1936,13 +1978,47 @@ class EvaluationDashboardVisualizer:
 
         cat_names = ["Auto", "Camion/Bus", "VRU (Pedoni/Bici)", "Barriere"]
 
-        def render_half(ax_kpi, ax_tab, title, tag, num_frames, res, theme_color, bg_card, is_val=False):
+        def render_half(ax_kpi, ax_tab, title, tag, split_size, res, theme_color, bg_card, is_val=False):
+            # Frame effettivamente valutati (presenti in cache), non la dimensione totale dello split
+            num_frames = res.get("n_frames", 0)
+            frames_lbl = (f"{num_frames} Fotogrammi valutati" if num_frames == split_size
+                          else f"{num_frames} di {split_size} Fotogrammi valutati")
+
             # 1. KPI Card
             ax_kpi.set_facecolor('#FFFFFF')
             for sp in ax_kpi.spines.values():
                 sp.set_color(c_border); sp.set_linewidth(1.1)
             ax_kpi.set_xlim(0, 1); ax_kpi.set_ylim(0, 1)
             ax_kpi.set_xticks([]); ax_kpi.set_yticks([])
+
+            # Split assente dalla cache: meta' neutra grigia, nessuna metrica fittizia a 0%
+            if num_frames == 0 and not recap_mancante:
+                g_col = '#64748B'
+                ax_kpi.set_facecolor('#F8FAFC')
+                ax_kpi.add_patch(Rectangle((0.02, 0.10), 0.22, 0.80, transform=ax_kpi.transAxes,
+                                           facecolor='#F1F5F9', edgecolor=g_col, linewidth=1.3, zorder=2))
+                ax_kpi.text(0.13, 0.50, "N/D", transform=ax_kpi.transAxes,
+                            fontsize=17.0, fontweight='bold', color=g_col, ha='center', va='center')
+                ax_kpi.text(0.27, 0.80, f"{tag}: {title} (0 di {split_size} Fotogrammi valutati)",
+                            transform=ax_kpi.transAxes, fontsize=8.5, fontweight='bold', color=g_col)
+                ax_kpi.text(0.27, 0.50, "NON VALUTATO (split non presente nella cache di valutazione)",
+                            transform=ax_kpi.transAxes, fontsize=8.6, fontweight='bold', color='#475569')
+                ax_kpi.text(0.27, 0.24, f"Per includerlo: python valutazione/evaluate_final_official.py --split {tag.lower()} --soglie valutazione/soglie_calibrate.json",
+                            transform=ax_kpi.transAxes, fontsize=7.4, color=g_col, style='italic')
+
+                ax_tab.set_facecolor('#F8FAFC')
+                for sp in ax_tab.spines.values():
+                    sp.set_color('#94A3B8'); sp.set_linewidth(1.1)
+                ax_tab.set_xlim(0, 1); ax_tab.set_ylim(0, 1)
+                ax_tab.set_xticks([]); ax_tab.set_yticks([])
+                ax_tab.set_title(f"Tabella Prestazioni Dettagliate - {tag} (non valutato)",
+                                 fontsize=9.0, fontweight='bold', pad=8, color=g_col)
+                ax_tab.text(0.5, 0.5, f"NON VALUTATO\n(split {tag} non presente nella cache di valutazione)",
+                            transform=ax_tab.transAxes, fontsize=11.0, fontweight='bold', color=g_col,
+                            ha='center', va='center', linespacing=1.6,
+                            bbox=dict(boxstyle="round,pad=0.8", facecolor='#F1F5F9',
+                                      edgecolor='#94A3B8', linewidth=1.2))
+                return
 
             # Box F1
             f1_val = res["f1"]
@@ -1959,7 +2035,7 @@ class EvaluationDashboardVisualizer:
             if recap_mancante:
                 tag_badge = "MODELLO MANCANTE (nessun risultato in cache)"
                 theme_color = '#64748B'
-            ax_kpi.text(0.27, 0.80, f"{tag}: {title} ({num_frames} Fotogrammi)", transform=ax_kpi.transAxes,
+            ax_kpi.text(0.27, 0.80, f"{tag}: {title} ({frames_lbl})", transform=ax_kpi.transAxes,
                         fontsize=8.5, fontweight='bold', color=theme_color)
             ax_kpi.text(0.27, 0.56, f"Recall Globale: {res['rec']:.1f}%   |   Precision Globale: {res['prec']:.1f}%",
                         transform=ax_kpi.transAxes, fontsize=8.2, fontweight='bold', color='#1E293B')
@@ -1974,7 +2050,7 @@ class EvaluationDashboardVisualizer:
                 sp.set_color(c_border); sp.set_linewidth(1.1)
             ax_tab.set_xlim(0, 1); ax_tab.set_ylim(0, 1)
             ax_tab.set_xticks([]); ax_tab.set_yticks([])
-            ax_tab.set_title(f"Tabella Prestazioni Dettagliate - {tag} ({num_frames} Frame)",
+            ax_tab.set_title(f"Tabella Prestazioni Dettagliate - {tag} ({num_frames} Frame valutati)",
                              fontsize=9.0, fontweight='bold', pad=8, color=c_border)
 
             headers = ["Categoria", "GT Tot", "TP", "FP", "FN", "Precision", "Recall", "F1-Score"]
@@ -2041,8 +2117,15 @@ class EvaluationDashboardVisualizer:
         d_rec = val_res['rec'] - tr_res['rec']
         d_prec = val_res['prec'] - tr_res['prec']
 
+        split_assenti = [t for t, r in (("TRAIN", tr_res), ("VAL", val_res)) if r["n_frames"] == 0]
         if recap_mancante:
             comm = "Modello MANCANTE: nessun risultato in cache per il modello/GT selezionati."
+            b_col = '#475569'; b_bg = '#F1F5F9'
+        elif split_assenti:
+            # Un solo split in cache: nessun delta TRAIN/VAL significativo
+            presenti = [t for t in ("TRAIN", "VAL") if t not in split_assenti]
+            comm = (f"Confronto TRAIN/VAL non disponibile: la cache contiene solo lo split {presenti[0]}"
+                    if presenti else "Confronto TRAIN/VAL non disponibile: nessuno split presente nella cache")
             b_col = '#475569'; b_bg = '#F1F5F9'
         elif abs(d_f1) <= 3.0:
             comm = "Overfitting Nullo: perfetta coerenza delle predizioni tra scene viste e inedite."
@@ -2054,10 +2137,13 @@ class EvaluationDashboardVisualizer:
             comm = f"Gap di Generalizzazione fisiologico (-{abs(d_f1):.1f}% F1 rispetto a train)."
             b_col = '#0369A1'; b_bg = '#F0F9FF'
 
-        banner = (f"BILANCIO SCIENTIFICO GENERALIZZAZIONE:  "
-                  f"Δ F1-Score: {d_f1:+.1f}%  |  "
-                  f"Δ Recall: {d_rec:+.1f}%  |  "
-                  f"Δ Precision: {d_prec:+.1f}%    [{comm}]")
+        if split_assenti and not recap_mancante:
+            banner = f"BILANCIO SCIENTIFICO GENERALIZZAZIONE:  {comm}"
+        else:
+            banner = (f"BILANCIO SCIENTIFICO GENERALIZZAZIONE:  "
+                      f"Δ F1-Score: {d_f1:+.1f}%  |  "
+                      f"Δ Recall: {d_rec:+.1f}%  |  "
+                      f"Δ Precision: {d_prec:+.1f}%    [{comm}]")
 
         self.fig_recap.text(0.50, 0.025, banner,
                             fontsize=9.0, fontweight='bold', color=b_col, ha='center', va='center',
@@ -2099,11 +2185,70 @@ class EvaluationDashboardVisualizer:
         elif event.key in ['c', 'C']:
             self.open_comparison_window()
         elif event.key in ['s', 'S']:
+            # Salva la figura della finestra in cui e' stato premuto il tasto
+            fig_evento = event.canvas.figure if event.canvas is not None else self.fig
             out_dir = os.path.join(ROOT_DIR, "documentazione", "immagini_tesi")
-            os.makedirs(out_dir, exist_ok=True)
-            fpath = os.path.join(out_dir, f"fig_5_evaluation_metrics_{self.current_model_key.lower()}_vs_{self.current_gt_key.lower()}_sample{self.current_idx + 1}.png")
-            self.fig.savefig(fpath, dpi=300, bbox_inches='tight', facecolor='#FFFFFF')
-            print(f"\n[SALVATA CON SUCCESSO]: Immagine Dashboard Metriche salvata in:\n  -> {fpath}")
+            fpath = self._salva_figura(fig_evento, out_dir, self._nome_file_figura(fig_evento))
+            print(f"\n[SALVATA CON SUCCESSO]: Immagine salvata in:\n  -> {fpath}")
+
+    def _nome_file_figura(self, fig):
+        """Nome file descrittivo in base alla finestra (dashboard, confronto 1-a-1, recap)."""
+        n = self.current_idx + 1
+        if self.fig_cmp is not None and fig is self.fig_cmp:
+            return (f"fig_5b_confronto_{self.cmp_model_a_key.lower()}_vs_{self.cmp_model_b_key.lower()}"
+                    f"_gt_{self.cmp_gt_key.lower()}_sample{n}.png")
+        if self.fig_recap is not None and fig is self.fig_recap:
+            return f"fig_5c_recap_{self.recap_model_key.lower()}_gt_{self.recap_gt_key.lower()}.png"
+        return f"fig_5_evaluation_metrics_{self.current_model_key.lower()}_vs_{self.current_gt_key.lower()}_sample{n}.png"
+
+    def _salva_figura(self, fig, out_dir, nome):
+        """Salva una figura a 300 DPI con sfondo bianco e bbox stretto; restituisce il percorso."""
+        os.makedirs(out_dir, exist_ok=True)
+        fpath = os.path.join(out_dir, nome)
+        fig.savefig(fpath, dpi=300, bbox_inches='tight', facecolor='#FFFFFF')
+        return fpath
+
+    def esporta_batch(self, out_dir):
+        """Export headless: recap per ogni modello/GT disponibile in cache e dashboard del frame iniziale."""
+        out_dir = os.path.abspath(out_dir)
+        modelli = ["NEURO_SIMB", "REAL_GT", "POS_ONLY"]
+        gts = ["REAL", "NEURO_SIMB", "GEOMETRIC", "SEMANTIC"]
+        gt_iniziale = self.current_gt_key
+        salvati = []
+        print(f"\n>>> [EXPORT BATCH] Cartella di destinazione: {out_dir}")
+
+        for m_k in modelli:
+            if not any(self._cache_ha_modello(m_k, g) for g in gts):
+                print(f"[EXPORT] Modello {m_k} assente dalla cache di valutazione: saltato.")
+                continue
+
+            # Recap globale per ogni GT
+            for g_k in gts:
+                if not self._cache_ha_modello(m_k, g_k):
+                    print(f"[EXPORT] Nessun risultato in cache per {m_k} / GT {g_k}: recap saltato.")
+                    continue
+                self.recap_model_key = m_k
+                self.recap_gt_key = g_k
+                if self.fig_recap is None or not plt.fignum_exists(self.fig_recap.number):
+                    self.fig_recap = plt.figure(num="nuScenes BEV - Recap Globale TRAIN vs VAL",
+                                                figsize=(18, 9.4), facecolor='#FFFFFF')
+                self.render_global_recap_window()
+                fpath = self._salva_figura(self.fig_recap, out_dir, self._nome_file_figura(self.fig_recap))
+                salvati.append(fpath)
+                print(f"[EXPORT] Recap salvato: {fpath}")
+
+            # Dashboard principale sul frame iniziale con la GT iniziale
+            self.current_model_key = m_k
+            self.current_gt_key = gt_iniziale
+            self._preload_model(m_k)
+            self.load_frame(self.current_idx, broadcast=False)
+            nome = f"fig_5_dashboard_{m_k.lower()}_gt_{gt_iniziale.lower()}_sample{self.current_idx + 1}.png"
+            fpath = self._salva_figura(self.fig, out_dir, nome)
+            salvati.append(fpath)
+            print(f"[EXPORT] Dashboard salvata: {fpath}")
+
+        print(f"\n[EXPORT COMPLETATO]: {len(salvati)} immagini salvate in {out_dir}")
+        return salvati
 
     def on_mouse_move(self, event):
         if event.inaxes != self.ax_map or event.xdata is None or event.ydata is None:
@@ -2214,23 +2359,41 @@ class EvaluationDashboardVisualizer:
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Dashboard Ufficiale Valutazione Prestazioni & Metriche Tesi")
-    parser.add_argument("frame", nargs="?", type=int, default=None, help="Numero del frame iniziale (1-404, default: 1)")
+    parser.add_argument("frame", nargs="?", type=int, default=None, help="Numero del frame iniziale (1-N, N = frame del dataset; default: 1)")
     parser.add_argument("--model", choices=["HYBRID", "NEURO_SIMB", "REAL_GT", "POS_ONLY", "BAYES", "GEOMETRIC", "SEMANTIC"], default="NEURO_SIMB", help="Modello iniziale")
     parser.add_argument("--gt", choices=["HYBRID", "NEURO_SIMB", "REAL", "GEOMETRIC", "SEMANTIC"], default="NEURO_SIMB", help="Target GT iniziale")
     parser.add_argument("--range", type=float, default=25.0, help="Raggio operativo BEV in metri (default: 25.0)")
     parser.add_argument("--save", type=str, default=None, help="Salva l'immagine della dashboard ad alta risoluzione (300 DPI) ed esce")
+    parser.add_argument("--cache", type=str, default=None,
+                        help="Forza il file di cache di valutazione JSON da caricare (default: il piu' recente in valutazione/)")
+    parser.add_argument("--esporta", type=str, default=None, metavar="DIR",
+                        help="Export headless: salva recap (per modello/GT) e dashboard del frame iniziale in DIR ed esce")
     args = parser.parse_args()
 
-    vis = EvaluationDashboardVisualizer(max_range=args.range, initial_model=args.model, initial_gt=args.gt)
+    # Modalita' senza finestre: backend non interattivo prima di creare le figure
+    headless = bool(args.esporta or args.save)
+    if headless:
+        plt.switch_backend("Agg")
+
+    vis = EvaluationDashboardVisualizer(max_range=args.range, initial_model=args.model, initial_gt=args.gt,
+                                        cache_path=args.cache, headless=headless)
     if args.frame is not None and 1 <= args.frame <= vis.total_frames:
         vis.load_frame(args.frame - 1, broadcast=False)
+    elif args.esporta and vis.eval_cache and vis.eval_cache.get("frames"):
+        # Senza frame esplicito l'export parte dal primo frame valutato in cache (metriche calibrate)
+        primo = min(int(k) for k in vis.eval_cache["frames"].keys())
+        if primo != vis.current_idx:
+            print(f"• [EXPORT] Frame iniziale non presente in cache: uso il primo frame valutato ({primo + 1})")
+            vis.load_frame(primo, broadcast=False)
 
+    if args.esporta:
+        vis.esporta_batch(args.esporta)
     if args.save:
         out_p = os.path.abspath(args.save)
         os.makedirs(os.path.dirname(out_p), exist_ok=True)
-        vis.fig.savefig(out_p, dpi=300, bbox_inches='tight')
+        vis.fig.savefig(out_p, dpi=300, bbox_inches='tight', facecolor='#FFFFFF')
         print(f"[OK] Dashboard salvata in: {out_p}")
-    else:
+    if not headless:
         plt.show()
 
 

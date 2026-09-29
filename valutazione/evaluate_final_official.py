@@ -655,10 +655,13 @@ def export_markdown_results(counts, models_dict, split, eval_cache=None):
         cache_default_path = os.path.join(os.path.dirname(__file__), "cache_valutazione_ufficiale.json")
         with open(cache_split_path, "w", encoding="utf-8") as cf:
             json.dump(eval_cache, cf)
+        cache_scritte = [cache_split_path]
         if split.lower() == "all" or not os.path.exists(cache_default_path):
             with open(cache_default_path, "w", encoding="utf-8") as cf:
                 json.dump(eval_cache, cf)
-        print(f"[CACHE VALUTAZIONE SALVATA]:\n  - {cache_split_path}\n  - {cache_default_path}")
+            cache_scritte.append(cache_default_path)
+        # Elenca solo i file effettivamente scritti
+        print("[CACHE VALUTAZIONE SALVATA]:\n" + "\n".join(f"  - {p}" for p in cache_scritte))
 
 
 def main():
