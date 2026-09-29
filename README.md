@@ -158,6 +158,9 @@ Tutti i visualizzatori si trovano in `visualizzatori/` e supportano la navigazio
 ```bash
 # 1. Dashboard Valutazione Prestazioni (Figure 5, 5b, 5c - Recap TRAIN vs VAL, KPI Cards, Matrice di Confusione)
 python visualizzatori/vis_valutazione_prestazioni.py
+#    Tasto S: salva a 300 DPI la finestra attiva in documentazione/immagini_tesi/
+#    Export senza finestre di tutti i recap (modello x GT) e delle dashboard:
+python visualizzatori/vis_valutazione_prestazioni.py --esporta documentazione/immagini_tesi
 
 # 2. Inferenza Neurale Live su GPU (Confronto modelli dinamico, classificazione con icone orientate)
 python visualizzatori/vis_inferenza_neurale.py
