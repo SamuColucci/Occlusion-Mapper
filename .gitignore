@@ -32,6 +32,9 @@ extracted_occlusions_temporal/
 # Eccezioni: icone e asset grafici essenziali dei visualizzatori
 !visualizzatori/assets/
 !visualizzatori/assets/**
+# Figure esportate per la tesi (vis_valutazione_prestazioni.py --esporta / tasto S)
+!documentazione/immagini_tesi/
+!documentazione/immagini_tesi/*.png
 
 # Cache di Python
 __pycache__/
