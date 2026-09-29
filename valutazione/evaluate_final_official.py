@@ -45,6 +45,11 @@ CATEGORIES = ["Auto", "Camion/Bus", "VRU (Pedoni/Bici)", "Barriera"]
 RADII = [20.0, 25.0]
 
 
+# Soglie di decisione sulle 4 macro-classi [Auto, Camion/Bus, VRU, Barriera], tarate sui modelli v1.0-mini.
+# Con --soglie si possono sostituire per singolo modello con valori calibrati
+SOGLIE_DEFAULT = [0.28, 0.25, 0.25, 0.26]
+
+
 def find_checkpoint(model_key, custom_path=None):
     """Localizza il file di checkpoint per il modello specificato cercando nei percorsi standard."""
     if custom_path and os.path.exists(custom_path):
@@ -415,11 +420,12 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                             float(max(out_6[2], out_6[3], out_6[4])),
                             float(out_6[5])
                         ]
+                        soglie = m_info.get("soglie", SOGLIE_DEFAULT)
                         pred_4 = np.zeros(4, dtype=int)
-                        pred_4[0] = int(out_6[0] >= 0.28 and area >= 3.5)
-                        pred_4[1] = int(out_6[1] >= 0.25 and area >= 8.0)
-                        pred_4[2] = int(max(out_6[2], out_6[3], out_6[4]) >= 0.25)
-                        pred_4[3] = int(out_6[5] >= 0.26)
+                        pred_4[0] = int(p4[0] >= soglie[0] and area >= 3.5)
+                        pred_4[1] = int(p4[1] >= soglie[1] and area >= 8.0)
+                        pred_4[2] = int(p4[2] >= soglie[2])
+                        pred_4[3] = int(p4[3] >= soglie[3])
 
                     # Aggiorna conteggi globali per raggio
                     for r in RADII:
@@ -666,7 +672,15 @@ def main():
                         help="Strategia della GT Sintetica di test: 'geometric', 'semantic' o 'hybrid'")
     parser.add_argument("--split", type=str, default="val", choices=["val", "train", "all"],
                         help="Split nuScenes su cui valutare: 'val' (150 scene mai viste, default), 'train' o 'all'")
+    parser.add_argument("--soglie", type=str, default=None,
+                        help="File JSON con le soglie per modello, es. {\"hybrid\": [0.5, 0.4, 0.6, 0.5]} "
+                             "(ordine: Auto, Camion/Bus, VRU, Barriera). I modelli assenti usano le soglie di default")
     args = parser.parse_args()
+
+    soglie_modelli = {}
+    if args.soglie:
+        with open(args.soglie, "r", encoding="utf-8") as f:
+            soglie_modelli = json.load(f)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -709,6 +723,11 @@ def main():
     for key in selected_keys:
         cfg = model_configs[key]
         if key == "bayes":
+            # Senza le probabilita' precalcolate la baseline produrrebbe solo predizioni vuote
+            bayes_dir = os.path.join(os.path.dirname(__file__), "..", "extracted_occlusions_probabilities")
+            if not os.path.isdir(bayes_dir) or not os.listdir(bayes_dir):
+                print(f"[ATTENZIONE]: Probabilita' bayesiane non trovate in {bayes_dir}. Salto questo modello.")
+                continue
             models_to_run[key] = {
                 "model": None,
                 "title": cfg["title"],
@@ -733,8 +752,10 @@ def main():
             "model": model,
             "title": cfg["title"],
             "short_name": cfg["short_name"],
-            "ckpt_path": ckpt_path
+            "ckpt_path": ckpt_path,
+            "soglie": soglie_modelli.get(key, SOGLIE_DEFAULT)
         }
+        print(f"• Soglie [{key}]: {models_to_run[key]['soglie']}")
 
     if not models_to_run:
         print("[ERRORE]: Nessun modello caricabile trovato. Controlla i checkpoint in 'pesi_modelli/'.")

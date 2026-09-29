@@ -1,0 +1,56 @@
+cache hybrid: 52176 zone
+cache real: 52176 zone
+
+=== modello hybrid vs GT hybrid (GT di addestramento)
+  classe           n zone  prev.    AUC     AP  F1@soglia eval  F1 max soglia F1max
+  c0 Auto           27346  0.412  0.942  0.917           0.587   0.857        0.646
+  c1 Camion/Bus     24882  0.066  0.905  0.564           0.125   0.538        0.667
+  c2 VRU-a          52176  0.527  0.939  0.936           0.691   0.884        0.677
+  c3 VRU-b          27346  0.246  0.948  0.830           0.518   0.785        0.694
+  c4 VRU-c          52176  0.261  0.949  0.853           0.468   0.793        0.660
+  c5 Barriera       50102  0.156  0.925  0.735           0.270   0.681        0.708
+
+=== modello hybrid vs GT real
+  classe           n zone  prev.    AUC     AP  F1@soglia eval  F1 max soglia F1max
+  c0 Auto           27346  0.181  0.786  0.439           0.308   0.467        0.659
+  c1 Camion/Bus     24882  0.048  0.873  0.430           0.092   0.406        0.721
+  c2 VRU-a          52176  0.030  0.508  0.027           0.058   0.068        0.482
+  c3 VRU-b          27346  0.003  0.531  0.003           0.007   0.008        0.303
+  c4 VRU-c          52176  0.004  0.615  0.005           0.009   0.011        0.401
+  c5 Barriera       50102  0.044  0.774  0.133           0.085   0.183        0.639
+
+=== modello real vs GT hybrid
+  classe           n zone  prev.    AUC     AP  F1@soglia eval  F1 max soglia F1max
+  c0 Auto           27346  0.412  0.717  0.692           0.584   0.616        0.384
+  c1 Camion/Bus     24882  0.066  0.802  0.442           0.126   0.433        0.628
+  c2 VRU-a          52176  0.527  0.487  0.531           0.681   0.690        0.202
+  c3 VRU-b          27346  0.246  0.541  0.253           0.366   0.406        0.212
+  c4 VRU-c          52176  0.261  0.615  0.339           0.455   0.455        0.250
+  c5 Barriera       50102  0.156  0.615  0.302           0.273   0.307        0.438
+
+=== modello real vs GT real (GT di addestramento)
+  classe           n zone  prev.    AUC     AP  F1@soglia eval  F1 max soglia F1max
+  c0 Auto           27346  0.181  0.917  0.796           0.307   0.720        0.600
+  c1 Camion/Bus     24882  0.048  0.891  0.529           0.093   0.507        0.662
+  c2 VRU-a          52176  0.030  0.841  0.242           0.060   0.287        0.584
+  c3 VRU-b          27346  0.003  0.833  0.016           0.010   0.056        0.400
+  c4 VRU-c          52176  0.004  0.837  0.058           0.011   0.124        0.533
+  c5 Barriera       50102  0.044  0.886  0.483           0.088   0.492        0.594
+
+=== modello positives_only vs GT hybrid
+  classe           n zone  prev.    AUC     AP  F1@soglia eval  F1 max soglia F1max
+  c0 Auto           27346  0.412  0.570  0.566           0.584   0.585        0.464
+  c1 Camion/Bus     24882  0.066  0.666  0.330           0.124   0.348        0.658
+  c2 VRU-a          52176  0.527  0.639  0.637           0.690   0.708        0.421
+  c3 VRU-b          27346  0.246  0.601  0.304           0.396   0.412        0.358
+  c4 VRU-c          52176  0.261  0.631  0.334           0.415   0.456        0.348
+  c5 Barriera       50102  0.156  0.626  0.240           0.270   0.308        0.544
+
+=== modello positives_only vs GT real (GT di addestramento)
+  classe           n zone  prev.    AUC     AP  F1@soglia eval  F1 max soglia F1max
+  c0 Auto           27346  0.181  0.824  0.613           0.306   0.557        0.842
+  c1 Camion/Bus     24882  0.048  0.759  0.370           0.092   0.388        0.723
+  c2 VRU-a          52176  0.030  0.674  0.079           0.058   0.140        0.747
+  c3 VRU-b          27346  0.003  0.498  0.003           0.006   0.008        0.487
+  c4 VRU-c          52176  0.004  0.708  0.018           0.008   0.045        0.599
+  c5 Barriera       50102  0.044  0.731  0.194           0.085   0.249        0.774
