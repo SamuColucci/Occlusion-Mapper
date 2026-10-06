@@ -35,6 +35,10 @@ extracted_occlusions_temporal/
 # Figure esportate per la tesi (vis_valutazione_prestazioni.py --esporta / tasto S)
 !documentazione/immagini_tesi/
 !documentazione/immagini_tesi/*.png
+!Figure/
+!Figure/*.png
+!Figure/**/*.png
+
 
 # Cache di Python
 __pycache__/
