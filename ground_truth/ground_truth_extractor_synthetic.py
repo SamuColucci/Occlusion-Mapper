@@ -53,11 +53,10 @@ def get_prioritized_classes(road_f=0.0, side_f=0.0, cross_f=0.0, area=0.0):
         if area >= 18.0:
             valid_classes.append(1)  # Camion
         valid_classes.append(3)  # Moto
-        valid_classes.append(5)  # Barriera (cantieri stradali / coni)
     elif is_walkway:
-        valid_classes.extend([2, 4, 5])  # Pedone, Bici, Barriera (cantieri marciapiede)
+        valid_classes.extend([2, 4])  # Pedone, Bici
     else:
-        valid_classes.extend([5, 4, 2])  # Barriera, Bici, Pedone
+        valid_classes.extend([4, 2])  # Bici, Pedone
     return valid_classes
 
 
@@ -127,9 +126,8 @@ def get_occluder_filter_explanation(occluder_name=None, occluder_wlh=None):
 
 
 
-# =============================================================================
 # 1. APPROCCIO GEOMETRICO (Spatially-Constrained / Physical-Aware)
-# =============================================================================
+
 def compute_synthetic_ground_truth_geometric(
     sp,
     road_f=0.0,
@@ -158,9 +156,11 @@ def compute_synthetic_ground_truth_geometric(
     gt_neuro_6 = np.zeros(6, dtype=np.float32)
     placed_objects = []
 
-    if gt_raw_6 is not None and np.sum(gt_raw_6) > 0:
-        gt_neuro_6 = np.array(gt_raw_6, dtype=np.float32)
-        return gt_neuro_6, placed_objects
+    if gt_raw_6 is not None:
+        gt_clean = np.array(gt_raw_6, dtype=np.float32)
+        gt_clean[5] = 0.0  # Barriere sempre escluse anche se presenti fisicamente nella zona
+        if np.sum(gt_clean[:5]) > 0:
+            return gt_clean, placed_objects
 
     if sp is None or sp.is_empty or area < 0.1:
         return gt_neuro_6, placed_objects
@@ -230,9 +230,8 @@ def compute_synthetic_ground_truth_geometric(
     return gt_neuro_6, placed_objects
 
 
-# =============================================================================
 # 2. APPROCCIO SEMANTICO (Semantic-Affordance / Permissive Prior)
-# =============================================================================
+
 def compute_synthetic_ground_truth_semantic(
     sp,
     road_f=0.0,
@@ -261,10 +260,12 @@ def compute_synthetic_ground_truth_semantic(
     gt_neuro_6 = np.zeros(6, dtype=np.float32)
     placed_objects = []
 
-    # 1. Se sono presenti ostacoli reali nuScenes annotati, li preserva
-    if gt_raw_6 is not None and np.sum(gt_raw_6) > 0:
-        gt_neuro_6 = np.array(gt_raw_6, dtype=np.float32)
-        return gt_neuro_6, placed_objects
+    # 1. Se sono presenti ostacoli reali nuScenes annotati (escluse barriere), li preserva
+    if gt_raw_6 is not None:
+        gt_clean = np.array(gt_raw_6, dtype=np.float32)
+        gt_clean[5] = 0.0  # Barriere sempre escluse
+        if np.sum(gt_clean[:5]) > 0:
+            return gt_clean, placed_objects
 
     if sp is None or sp.is_empty or area < 0.1:
         return gt_neuro_6, placed_objects
@@ -291,9 +292,8 @@ def compute_synthetic_ground_truth_semantic(
     if (side_f >= 0.15 or cross_f >= 0.08 or (road_f >= 0.25 and obb_w < 1.8)) and obb_w >= 0.4 and area >= 0.6:
         gt_neuro_6[2] = 1.0  # Pedoni
 
-    # Regola Barriere su terreno incolto laterale
-    if terr_f >= 0.55 and obb_w >= 1.0 and area >= 3.0 and road_f < 0.15 and side_f < 0.10:
-        gt_neuro_6[5] = 1.0  # Barriere
+    # Barriere rimosse: non sono considerate attori di traffico da anticipare
+    gt_neuro_6[5] = 0.0
 
     # Filtro di compatibilità dimensionale dell'occludore
     valid_sem = [c for c in range(6) if gt_neuro_6[c] > 0.5]
@@ -317,9 +317,8 @@ def compute_synthetic_ground_truth_semantic(
     return gt_neuro_6, placed_objects
 
 
-# =============================================================================
 # 3. APPROCCIO IBRIDO (Spatio-Semantic / Geometric + Semantic Joint Constraint)
-# =============================================================================
+
 def compute_synthetic_ground_truth_hybrid(
     sp,
     road_f=0.0,
@@ -362,10 +361,12 @@ def compute_synthetic_ground_truth_hybrid(
     eff_road_car = max(road_f, 0.40 * roadside_f)
     eff_road_truck = max(road_f, 0.35 * roadside_f)
 
-    # 1. Preservazione INCONDIZIONATA degli ostacoli reali nuScenes annotati.
-    # Il gating fisico si applica solo alle label sintetiche (zone vuote), mai a oggetti realmente osservati.
-    if gt_raw_6 is not None and np.sum(gt_raw_6) > 0:
-        return np.array(gt_raw_6, dtype=np.float32), placed_objects
+    # 1. Preservazione degli ostacoli reali nuScenes annotati (escluse barriere ed arredi fissi).
+    if gt_raw_6 is not None:
+        gt_clean = np.array(gt_raw_6, dtype=np.float32)
+        gt_clean[5] = 0.0  # Barriere sempre escluse anche se presenti nell'ombra
+        if np.sum(gt_clean[:5]) > 0:
+            return gt_clean, placed_objects
 
     if sp is None or sp.is_empty or area < 0.1:
         return gt_neuro_6, placed_objects
@@ -397,10 +398,7 @@ def compute_synthetic_ground_truth_hybrid(
     if (side_f >= 0.04 or cross_f >= 0.02 or (road_f < 0.25 and area >= 0.35) or (road_f >= 0.12 and obb_w < 1.6)) and area >= 0.35:
         valid_classes.append(2)  # Pedone
         valid_classes.append(4)  # Bici
-    # Barriere da cantiere, jersey e coni: delimitano corsie e lavori su strada, marciapiedi o margini
-    # Hanno ingombro compatto e lineare tipico delle transenne/coni
-    if obb_w <= 2.4 and area >= 0.5:
-        valid_classes.append(5)  # Barriera
+    # Barriere rimosse dai target di predizione (arredo fisso gestito geometricamente)
 
     # Filtro di compatibilità dimensionale dell'occludore
     valid_classes = apply_occluder_compatibility_filter(
@@ -469,9 +467,8 @@ def compute_synthetic_ground_truth_hybrid(
     return gt_neuro_6, placed_objects
 
 
-# =============================================================================
 # FUNZIONE WRAPPER UNIFICATA (Default: mode='geometric')
-# =============================================================================
+
 def compute_synthetic_ground_truth(
     sp,
     road_f=0.0,
@@ -555,14 +552,16 @@ def compute_synthetic_ground_truth(
 def to_macro_classes_4(gt_6):
     """
     Converte un vettore a 6 classi [Auto, Camion, Pedone, Moto, Bici, Barriera]
-    nelle 4 macro-classi standard ISO 26262 [Auto, Camion/Bus, VRU, Barriera].
+    nelle 3 macro-classi standard [Auto, Camion/Bus, VRU].
+    (Mantenuto nome to_macro_classes_4 per retrocompatibilità con tutti i moduli).
     """
     return np.array([
         gt_6[0],
         gt_6[1],
-        max(gt_6[2], gt_6[3], gt_6[4]),
-        gt_6[5]
+        max(gt_6[2], gt_6[3], gt_6[4])
     ], dtype=np.float32)
+
+to_macro_classes = to_macro_classes_4
 
 
 if __name__ == "__main__":

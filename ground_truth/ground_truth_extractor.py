@@ -125,17 +125,17 @@ def extract_real_occlusion_ground_truth(boxes, occ_polygon, occluder_tokens=None
     evitando che l'ostacolo visibile in primo piano venga conteggiato come bersaglio nascosto.
     
     Ritorna:
-      gt_6: array np float32 a 6 canali [Auto, Camion/Bus, Pedone, Moto, Bici, Barriere]
-      gt_4: array np float32 a 4 macro-classi [Auto, Camion/Bus, VRU (Pedoni/Bici/Moto), Barriere]
+      gt_6: array np float32 a 6 canali [Auto, Camion/Bus, Pedone, Moto, Bici, Barriere (0.0)]
+      gt_3: array np float32 a 3 macro-classi [Auto, Camion/Bus, VRU (Pedoni/Bici/Moto)]
     """
     from shapely.geometry import Polygon as ShapelyPoly
     from shapely.geometry.base import BaseGeometry
 
     gt_6 = np.zeros(6, dtype=np.float32)
-    gt_4 = np.zeros(4, dtype=np.float32)
+    gt_3 = np.zeros(3, dtype=np.float32)
 
     if occ_polygon is None:
-        return gt_6, gt_4
+        return gt_6, gt_3
 
     if isinstance(occ_polygon, BaseGeometry):
         sp_occ = occ_polygon
@@ -143,15 +143,15 @@ def extract_real_occlusion_ground_truth(boxes, occ_polygon, occluder_tokens=None
         try:
             pts_np = np.array(occ_polygon)
             if len(pts_np) < 3:
-                return gt_6, gt_4
+                return gt_6, gt_3
             sp_occ = ShapelyPoly(pts_np[:, :2])
         except Exception:
-            return gt_6, gt_4
+            return gt_6, gt_3
 
     if not sp_occ.is_valid:
         sp_occ = sp_occ.buffer(0)
     if not sp_occ.is_valid or sp_occ.area < 0.01:
-        return gt_6, gt_4
+        return gt_6, gt_3
 
     exclude_set = set(occluder_tokens) if occluder_tokens is not None else set()
 
@@ -188,26 +188,25 @@ def extract_real_occlusion_ground_truth(boxes, occ_polygon, occluder_tokens=None
                     cat = name.lower()
                     if "car" in cat:
                         gt_6[0] = 1.0
-                        gt_4[0] = 1.0
+                        gt_3[0] = 1.0
                     elif "truck" in cat or "bus" in cat or "trailer" in cat:
                         gt_6[1] = 1.0
-                        gt_4[1] = 1.0
+                        gt_3[1] = 1.0
                     elif "human" in cat or "pedestrian" in cat:
                         gt_6[2] = 1.0
-                        gt_4[2] = 1.0
+                        gt_3[2] = 1.0
                     elif "motorcycle" in cat:
                         gt_6[3] = 1.0
-                        gt_4[2] = 1.0
+                        gt_3[2] = 1.0
                     elif "bicycle" in cat:
                         gt_6[4] = 1.0
-                        gt_4[2] = 1.0
-                    else:
-                        gt_6[5] = 1.0
-                        gt_4[3] = 1.0
+                        gt_3[2] = 1.0
+                    # Barriere, new jersey, cantieri, coni e detriti sono arredi fissi
+                    # gestiti a livello geometrico e NON vengono considerati ostacoli target
         except Exception:
             continue
 
-    return gt_6, gt_4
+    return gt_6, gt_3
 
 
 def extract_real_occlusion_boxes(boxes, occlusions, max_range=25.0):
@@ -279,13 +278,16 @@ def get_occlusion_ground_truth_target(target_tensor, poly_pts):
     # Rasterizza la maschera binaria 2D della specifica zona d'ombra
     poly_mask = rasterize_polygon(poly_pts) > 0.5
     
-    # Interroga ciascuno dei 6 canali GT SOLO ed ESCLUSIVAMENTE sui pixel ricadenti nell'ombra
+    # Interroga ciascuno dei canali GT SOLO ed ESCLUSIVAMENTE sui pixel ricadenti nell'ombra
     if np.any(poly_mask):
         tgt_np = target_tensor.numpy() if hasattr(target_tensor, 'numpy') else target_tensor
-        for c in range(num_classes):
-            # Se la maschera dell'ombra sovrappone almeno un pixel dell'ostacolo reale, imposta la presenza a 1.0
+        # Solo le classi dinamiche 0..4 (Auto, Camion, Pedoni, Moto, Bici); le barriere (5) sono escluse dai target
+        for c in range(min(5, num_classes)):
             if np.any(tgt_np[c][poly_mask] > 0.5):
                 target_classes[c] = 1.0
+
+    if num_classes > 5:
+        target_classes[5] = 0.0
                 
     return target_classes
 

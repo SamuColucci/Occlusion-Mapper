@@ -1,4 +1,3 @@
-# ==============================================================================
 # VISUALIZZATORE UFFICIALE TESI - DATI GREZZI NUSCENES SENZA OCCLUSIONI (STILE PAPER)
 # File: visualizzatori/vis_style1_raw_nuscenes.py
 #
@@ -10,7 +9,7 @@
 # - NESSUNA ZONA OCCLUSA DISEGNATA (rappresentazione pura dello stato percettivo iniziale);
 # - Telemetria ego vehicle, istogramma categorie e legenda completa;
 # - Tasto [S] salva a 300 DPI in documentazione/immagini_tesi/fig_1_lidar_nuscenes_raw.png.
-# ==============================================================================
+
 
 import os
 import sys
@@ -26,12 +25,15 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from dataset_adapter.factory_dataset import create_adapter
 
 class PaperRawVisualizer:
-    def __init__(self):
+    def __init__(self, dataroot=None):
         print("\n" + "=" * 80)
         print("   VISUALIZZATORE TESI: DATASET NUSCENES RAW (SENZA ZONE OCCLUSE)")
         print("=" * 80)
 
-        self.adapter = create_adapter("nuscenes", "./nuscenes")
+        if dataroot is None:
+            dataroot = "./nuscenes" if os.path.exists("./nuscenes") else "D:/nuScenes"
+        self.dataroot = os.path.abspath(dataroot)
+        self.adapter = create_adapter("nuscenes", self.dataroot)
         self.total_frames = self.adapter.get_num_samples()
         self.current_idx = 0
         self.max_range = 25.0
@@ -117,6 +119,8 @@ class PaperRawVisualizer:
     def draw_icon_object(self, ax, icon_name, center, length, deg=0.0, width=None,
                          flip_h=False, halo_color=None, halo_radius=None):
         """Disegna un'icona raster/vettoriale trasparente ruotata e scalata preservando le proporzioni naturali."""
+        import matplotlib.transforms as mtransforms
+        from matplotlib.patches import Circle
         from PIL import Image
 
         if halo_color and halo_radius:
@@ -125,24 +129,20 @@ class PaperRawVisualizer:
         if icon_name not in self.icons:
             return
 
-        pil_img = self.icons[icon_name]
+        icon_img = self.icons[icon_name]
         if flip_h:
-            pil_img = pil_img.transpose(Image.FLIP_LEFT_RIGHT)
+            icon_img = icon_img.transpose(Image.FLIP_LEFT_RIGHT)
 
-        if deg != 0.0:
-            pil_img = pil_img.rotate(deg, expand=True, resample=Image.BICUBIC)
+        img_w, img_h = icon_img.size
+        aspect = img_h / img_w
 
-        img_w, img_h = pil_img.size
         if width is None:
-            width = length / (img_h / img_w) if img_h > 0 else length
+            width = length / aspect
 
-        extent = [
-            center[0] - width / 2.0,
-            center[0] + width / 2.0,
-            center[1] - length / 2.0,
-            center[1] + length / 2.0
-        ]
-        ax.imshow(pil_img, extent=extent, zorder=8, interpolation='lanczos')
+        tr = mtransforms.Affine2D().rotate_deg_around(center[0], center[1], deg) + ax.transData
+        extent = [center[0] - width/2.0, center[0] + width/2.0,
+                  center[1] - length/2.0, center[1] + length/2.0]
+        ax.imshow(icon_img, extent=extent, transform=tr, zorder=8, origin='upper', clip_on=True)
 
     def render(self):
         self.fig.clf()
@@ -170,9 +170,8 @@ class PaperRawVisualizer:
         c_moto = '#D97706'
         c_barrier = '#F59E0B'
 
-        # =====================================================================
         # 1. PANNELLO SINISTRA: MAPPA BEV AD ALTA FEDELTÀ (RAGGIO 25M)
-        # =====================================================================
+
         ax_map.set_facecolor(c_bg)
 
         # A. Quadrettatura metrica 2m x 2m (estesa su raggio 25m)
@@ -375,9 +374,8 @@ class PaperRawVisualizer:
             spine.set_color(c_border)
             spine.set_linewidth(1.3)
 
-        # =====================================================================
         # 2. PANNELLO DESTRA ALTO: TELEMETRIA EGO VEHICLE & METADATI SCENA
-        # =====================================================================
+
         ax_telemetry.set_facecolor('#F8FAFC')
         for spine in ax_telemetry.spines.values():
             spine.set_color(c_border)
@@ -415,9 +413,8 @@ class PaperRawVisualizer:
         ax_telemetry.set_xticks([])
         ax_telemetry.set_yticks([])
 
-        # =====================================================================
         # 3. PANNELLO DESTRA CENTRO: CONTEGGIO OSTACOLI REALI NEL RAGGIO VISIVO
-        # =====================================================================
+
         ax_objects.set_facecolor('#FFFFFF')
         for spine in ax_objects.spines.values():
             spine.set_color(c_border)
@@ -450,9 +447,8 @@ class PaperRawVisualizer:
             ax_objects.text(bar.get_x() + bar.get_width()/2.0, val + 0.3, str(val),
                             ha='center', va='bottom', fontsize=9, fontweight='bold', color=c_border)
 
-        # =====================================================================
         # 4. PANNELLO DESTRA IN BASSO: SIMBOLOGIA & LEGENDA UFFICIALE
-        # =====================================================================
+
         ax_legend.set_facecolor('#FFFFFF')
         for spine in ax_legend.spines.values():
             spine.set_color(c_border)
@@ -531,8 +527,14 @@ class PaperRawVisualizer:
     def on_jump_frame(self, text):
         try:
             val = int(text.strip())
-            target = (val - 1) if 1 <= val <= self.total_frames else val
-            if 0 <= target < self.total_frames and target != self.current_idx:
+            if val < 1:
+                target = 0
+            elif val > self.total_frames:
+                target = self.total_frames - 1
+                print(f"[INFO] Frame inserito ({val}) superiore al massimo ({self.total_frames}). Caricato frame finale {self.total_frames}.")
+            else:
+                target = val - 1
+            if target != self.current_idx:
                 self.load_frame(target)
         except ValueError:
             pass
@@ -563,9 +565,10 @@ if __name__ == "__main__":
     parser.add_argument("frame_pos", nargs="?", type=int, default=None, help="Numero del frame iniziale a cui saltare (1-404)")
     parser.add_argument("--save", action="store_true", help="Salva immediatamente a 300 DPI ed esce")
     parser.add_argument("--frame", type=int, default=None, help="Indice del frame iniziale")
+    parser.add_argument("--dataroot", type=str, default=None, help="Percorso dataset nuScenes (default: ./nuscenes o D:/nuScenes)")
     args = parser.parse_args()
 
-    app = PaperRawVisualizer()
+    app = PaperRawVisualizer(dataroot=args.dataroot)
     init_f = args.frame_pos if args.frame_pos is not None else args.frame
     if init_f is not None:
         target = (init_f - 1) if init_f >= 1 and args.frame_pos is not None else init_f

@@ -1,4 +1,3 @@
-# ==============================================================================
 # VISUALIZZATORE UFFICIALE TESI - PROBABILITÀ CONDIZIONATA BAYESIANA NELLE ZONE OCCLUSE
 # File: visualizzatori/vis_probabilita_bayes.py
 #
@@ -12,7 +11,7 @@
 # - [S]: Salva screenshot scientifico ad alta risoluzione (300 DPI)
 # - Hover del Mouse: Mostra il tooltip con le probabilità analitiche per ogni classe
 # - Casella di testo in alto a destra: Salto diretto a qualsiasi numero di frame (1-404)
-# ==============================================================================
+
 
 import os
 import sys
@@ -267,9 +266,8 @@ class BayesOcclusionVisualizer:
                       f"Figure 2B: Stima del Rischio con Probabilità Condizionata Bayesiana (BEV Raggio {int(self.max_range)}m)",
                       fontsize=11.5, fontweight='bold', color='#0F172A', ha='left', va='center')
 
-        # =====================================================================
         # 1. PANNELLO SINISTRA: MAPPA BEV COMPLETA AD ALTA FEDELTÀ
-        # =====================================================================
+
         ax_map.set_facecolor('#F8FAFC')
         ax_map.set_xlim(-self.max_range, self.max_range)
         ax_map.set_ylim(-self.max_range, self.max_range)
@@ -326,13 +324,12 @@ class BayesOcclusionVisualizer:
                 ax_map.scatter(pts_r[:, 0], pts_r[:, 1], s=1.1, c='#0F172A',
                                alpha=0.68, zorder=3, edgecolors='none')
 
-        # Conteggi per statistiche
-        counts_visibili = {"Auto": 0, "Camion/Bus": 0, "VRU (Pedoni)": 0, "Barriere": 0}
-        counts_bayes = {"Auto": 0, "Camion/Bus": 0, "VRU (Pedoni)": 0, "Barriere": 0}
+        # Conteggi per statistiche (3 classi dinamiche)
+        counts_visibili = {"Auto": 0, "Camion/Bus": 0, "VRU (Pedoni)": 0}
+        counts_bayes = {"Auto": 0, "Camion/Bus": 0, "VRU (Pedoni)": 0}
 
-        # ---------------------------------------------------------------------
         # ZONE OCCLUSE & PROBABILITÀ CONDIZIONATE BAYESIANE
-        # ---------------------------------------------------------------------
+
         boosted_zone_count = 0
         all_risks = []
 
@@ -370,13 +367,12 @@ class BayesOcclusionVisualizer:
                         probs[b_cat] = 0.35 if b_cat == "Pedone" else 0.30
                 base_risk = min(0.38, base_risk * 0.5)
 
-            # Calcolo categoria dominante
+            # Calcolo categoria dominante tra le sole 3 macro-classi dinamiche
             p_auto = probs.get("Auto", 0.0)
             p_camion = max(probs.get("Camion", 0.0), probs.get("Bus", 0.0), probs.get("Rimorchio", 0.0))
             p_vru = max(probs.get("Pedone", 0.0), probs.get("Bicicletta", 0.0), probs.get("Moto", 0.0))
-            p_barr = max(probs.get("Barriera", 0.0), probs.get("Cono", 0.0))
 
-            max_p = max(p_auto, p_camion, p_vru, p_barr)
+            max_p = max(p_auto, p_camion, p_vru)
             effective_risk = max(base_risk, max_p)
             all_risks.append(effective_risk)
 
@@ -392,10 +388,8 @@ class BayesOcclusionVisualizer:
                 pred_cls = "Auto"
             elif max_p == p_camion:
                 pred_cls = "Camion/Bus"
-            elif max_p == p_vru:
-                pred_cls = "VRU (Pedoni)"
             else:
-                pred_cls = "Barriere"
+                pred_cls = "VRU (Pedoni)"
 
             # Colore del poligono in base alla probabilità/rischio
             if effective_risk >= 0.40 or len(boosted) > 0:
@@ -432,15 +426,11 @@ class BayesOcclusionVisualizer:
                     counts_bayes["Camion/Bus"] += 1
                     self.draw_icon_object(ax_map, 'truck_red', center=[cx, cy], length=5.5, deg=0.0)
                     h_off = 3.1
-                elif "VRU" in pred_cls:
+                else:
                     counts_bayes["VRU (Pedoni)"] += 1
                     self.draw_icon_object(ax_map, 'pedestrian_red', center=[cx, cy], length=2.8, deg=0.0,
                                           halo_color='#FEE2E2', halo_radius=1.5)
                     h_off = 1.8
-                else:
-                    counts_bayes["Barriere"] += 1
-                    self.draw_icon_object(ax_map, 'barrier_red', center=[cx, cy], length=2.2, deg=0.0)
-                    h_off = 1.5
 
                 # Badge percentuale probabilità sopra all'oggetto
                 badge_lbl = f"{int(max_p*100)}%"
@@ -567,7 +557,6 @@ class BayesOcclusionVisualizer:
                 self.draw_icon_object(ax_map, 'motorcycle_amber', center=center_xy, length=2.6, deg=0.0,
                                       flip_h=flip, halo_color='#FDE68A', halo_radius=1.5)
             elif "barrier" in b_name:
-                counts_visibili["Barriere"] += 1
                 self.draw_icon_object(ax_map, 'barrier_hazard', center=center_xy, length=2.2, deg=0.0)
             elif "pushable" in b_name or "pullable" in b_name:
                 self.draw_icon_object(ax_map, 'cart_trolley', center=center_xy, length=2.2, deg=0.0)
@@ -591,9 +580,8 @@ class BayesOcclusionVisualizer:
             spine.set_color(c_border)
             spine.set_linewidth(1.3)
 
-        # =====================================================================
         # 2. PANNELLO DESTRA ALTO: TELEMETRIA EGO VEHICLE & METADATI BAYES
-        # =====================================================================
+
         ax_telemetry.set_facecolor('#F8FAFC')
         for spine in ax_telemetry.spines.values():
             spine.set_color(c_border)
@@ -652,9 +640,8 @@ class BayesOcclusionVisualizer:
         ax_telemetry.set_xticks([])
         ax_telemetry.set_yticks([])
 
-        # =====================================================================
         # 3. PANNELLO DESTRA CENTRO: CONFRONTO OSTACOLI VISIBILI vs BAYES
-        # =====================================================================
+
         ax_objects.set_facecolor('#FFFFFF')
         for spine in ax_objects.spines.values():
             spine.set_color(c_border)
@@ -662,7 +649,7 @@ class BayesOcclusionVisualizer:
         ax_objects.spines['top'].set_visible(False)
         ax_objects.spines['right'].set_visible(False)
 
-        cat_names = ["Auto", "Camion/Bus", "VRU (Pedoni)", "Barriere"]
+        cat_names = ["Auto", "Camion/Bus", "VRU (Pedoni)"]
         vals_vis = [counts_visibili[c] for c in cat_names]
         vals_bayes = [counts_bayes[c] for c in cat_names]
 
@@ -710,9 +697,8 @@ class BayesOcclusionVisualizer:
                 ax_objects.text(bar.get_x() + bar.get_width()/2.0, h + 0.25, str(int(h)),
                                 ha='center', va='bottom', fontsize=8.5, fontweight='bold', color='#DC2626')
 
-        # =====================================================================
         # 4. PANNELLO DESTRA BASSO: LEGENDA UFFICIALE & SIMBOLOGIA
-        # =====================================================================
+
         ax_legend.set_facecolor('#FFFFFF')
         for spine in ax_legend.spines.values():
             spine.set_color(c_border)
@@ -780,9 +766,8 @@ class BayesOcclusionVisualizer:
             ax_legend.text(0.670, cur_y, it[3], transform=ax_legend.transAxes,
                            fontsize=7.0, color=c_border, va='center', fontweight='medium')
 
-        # =====================================================================
         # 5. MENU A TENDINA & CASELLA DI SALTO FRAME IN ALTO
-        # =====================================================================
+
         ax_dd = self.fig.add_axes([0.575, 0.938, 0.270, 0.036])
         arrow = "▲" if getattr(self, 'dropdown_open', False) else "▼"
         mode_btn_labels = {
@@ -817,9 +802,8 @@ class BayesOcclusionVisualizer:
 
         self.fig.canvas.draw_idle()
 
-    # =========================================================================
     # GESTIONE MENU A TENDINA PER MODALITÀ BAYES
-    # =========================================================================
+
     def toggle_dropdown(self, event=None):
         self.dropdown_open = not getattr(self, 'dropdown_open', False)
         if self.dropdown_open:
@@ -889,9 +873,8 @@ class BayesOcclusionVisualizer:
         print(f"\n>>> [DROPDOWN MENU] Selezionata modalità Bayes: {self.current_mode}")
         self.render()
 
-    # =========================================================================
     # EVENTI TASTIERA & MOUSE
-    # =========================================================================
+
     def on_key(self, event):
         if event.key in ['right', 'd', 'D']:
             self.load_frame(self.current_idx + 1)

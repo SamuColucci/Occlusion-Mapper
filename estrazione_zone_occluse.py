@@ -37,10 +37,13 @@ adapter = None
 
 
 # Inizializzatore per i processi worker su Windows (spawn) e Linux (fork)
-def init_worker(shared_adapter, shared_rigenera):
-    global adapter, RIGENERA
-    adapter = shared_adapter
+def init_worker(dataset_name, dataroot, shared_rigenera, shared_output_dir):
+    global adapter, RIGENERA, CARTELLA_OUTPUT
+    from dataset_adapter.factory_dataset import create_adapter
+    adapter = create_adapter(dataset_name, dataroot)
+    adapter.precarica_mappe()
     RIGENERA = shared_rigenera
+    CARTELLA_OUTPUT = os.path.abspath(shared_output_dir)
 
 
 # Elabora un singolo fotogramma e ne salva i poligoni d'ombra su disco.
@@ -85,18 +88,23 @@ def main():
     parser.add_argument("--rigenera", action="store_true",
                         help="Rielabora anche i fotogrammi gia' presenti in extracted_occlusions/ "
                              "(per impostazione predefinita vengono saltati, cosi da riprendere un'esecuzione interrotta)")
+    parser.add_argument("--dataroot", type=str, default=os.environ.get("NUSCENES_DATAROOT", "./nuscenes"),
+                        help="Percorso della cartella contenente il dataset nuScenes (default: ./nuscenes o env NUSCENES_DATAROOT)")
+    parser.add_argument("--output", type=str, default=os.environ.get("OCCLUSIONS_OUTPUT", "extracted_occlusions"),
+                        help="Cartella di destinazione dei JSON estratti (default: extracted_occlusions)")
     args = parser.parse_args()
 
-    global RIGENERA
+    global RIGENERA, CARTELLA_OUTPUT
     RIGENERA = args.rigenera
+    CARTELLA_OUTPUT = os.path.abspath(args.output)
 
     # Scelta del dataset target da elaborare
     dataset_name = "nuscenes"
-    # Definizione del percorso relativo della cartella dei dati grezzi nuScenes
-    dataroot = "./nuscenes"
+    # Definizione del percorso dei dati grezzi nuScenes
+    dataroot = os.path.abspath(args.dataroot)
 
     global adapter
-    print(f"Caricamento adattatore: {dataset_name}...")
+    print(f"Caricamento adattatore: {dataset_name} da {dataroot}...")
     # Istanzia l'adattatore del dataset nuScenes tramite il Factory Pattern
     adapter = create_adapter(dataset_name, dataroot)
     # Recupera il numero totale di fotogrammi (sample) presenti nel dataset
@@ -113,20 +121,22 @@ def main():
     # collector li attraverserebbe nei figli, duplicando gli 8 GB di metadati per ogni processo
     gc.freeze()
 
-    print(f"Elaborazione di {num_samples} fotogrammi su {args.workers} processi...\n")
+    print(f"Elaborazione di {num_samples} fotogrammi su {args.workers} worker (output: {CARTELLA_OUTPUT})...\n", flush=True)
     elaborati = saltati = 0
-    with Pool(processes=args.workers, initializer=init_worker, initargs=(adapter, RIGENERA)) as pool:
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for completati, (token, n_poligoni) in enumerate(
-                pool.imap_unordered(elabora_fotogramma, range(num_samples), chunksize=8), start=1):
+                pool.map(elabora_fotogramma, range(num_samples)), start=1):
             if n_poligoni is None:
                 saltati += 1
                 esito = "gia' presente, saltato"
             else:
                 elaborati += 1
                 esito = f"{n_poligoni} poligoni"
-            print(f"[{completati}/{num_samples}] {token}: {esito}")
+            if completati % 50 == 0 or completati <= 25 or completati == num_samples:
+                print(f"[{completati}/{num_samples}] {token}: {esito}", flush=True)
 
-    print(f"\nCompletato: {elaborati} fotogrammi elaborati, {saltati} gia' presenti e saltati.")
+    print(f"\nCompletato: {elaborati} fotogrammi elaborati, {saltati} gia' presenti e saltati.", flush=True)
 
 
 # Blocco principale di esecuzione se il file viene lanciato direttamente da riga di comando

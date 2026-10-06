@@ -1,140 +1,170 @@
-# 🚀 Guida Ufficiale di Esecuzione della Pipeline e degli Agenti (Tesi)
+# Guida Completa all'Esecuzione del Progetto: Occlusion-Mapper
 
-Questa guida illustra la procedura completa per riprodurre, addestrare, valutare e visualizzare tutti i moduli del sistema di stima delle occlusioni sviluppato per la tesi di laurea.
-
----
-
-## 🛠️ Prerequisiti e Ambiente Virtuale
-Tutti i comandi utilizzano l'ambiente virtuale dedicato configurato con supporto CUDA per GPU NVIDIA (RTX 3060):
-```powershell
-# Esegui i comandi dalla radice del progetto
-.\.venv\Scripts\python.exe <percorso_script.py>
-```
+Benvenuto in **Occlusion-Mapper**. Questa guida è pensata per spiegare in modo chiaro e accessibile il funzionamento del sistema, la struttura della pipeline e tutti i comandi necessari per riprodurre gli esperimenti, eseguire l'addestramento, calcolare le valutazioni e avviare i visualizzatori grafici.
 
 ---
 
-## 📦 1. Estrazione Geometrica delle Zone d'Ombra (Raycasting LiDAR)
-Esegue la simulazione del fascio LiDAR 3D polar-grid e calcola i poligoni 2D Bird's Eye View (BEV) delle zone cieche per tutti i 404 frame nuScenes, salvandoli in `extracted_occlusions/`:
-```powershell
-.\.venv\Scripts\python.exe estrazione_zone_occluse.py
-```
+## 1. Cos'è Occlusion-Mapper? (Spiegazione Intuitiva)
+
+### Il Problema dei Punti Ciechi nei Veicoli Autonomi
+I sensori a bordo delle auto a guida autonoma (telecamere e LiDAR) funzionano in **linea di vista diretta** (*Line-of-Sight*): vedono solo ciò che non è coperto da ostacoli. Se un furgone è parcheggiato lungo la strada, il sensore non può vedere cosa c'è dietro. Un pedone o un ciclista che sbuca all'improvviso da quel varco cieco costringe il veicolo a frenate d'emergenza o causa collisioni.
+
+I sistemi attuali hanno due limiti opposti:
+* **I rilevatori 3D classici** ignorano l'area nascosta finché l'ostacolo non è visibile (tempo di reazione pari a zero).
+* **Le regole conservative (es. Mobileye RSS)** assumono il caso peggiore ovunque (frenate continue e traffico bloccato).
+
+### La Soluzione Proposta
+**Occlusion-Mapper** stima in tempo reale il rischio all'interno dei varchi occlusi combinando:
+1. **Geometria dell'ombra (LiDAR 3D)**: individua con precisione matematica i volumi d'ombra proiettati dagli ostacoli.
+2. **Semantica Stradale (Mappe HD)**: analizza la superficie su cui cade l'ombra (es. asfalto carrabile, marciapiede, strisce pedonali).
+3. **Rete Neurale con Vincoli Fisici (Neuro-Simbolica)**: una rete convoluzionale guidata dall'attenzione (*AttentionPerZoneModel*) stima la probabilità che dietro l'angolo vi sia un'auto, un mezzo pesante o un pedone/ciclista (VRU), bloccando a priori predizioni fisicamente impossibili (es. un camion non può nascondersi dietro un'utilitaria bassa; un'auto non transita sul marciapiede).
 
 ---
 
-## 🎯 2. Visualizzatori Interattivi Ufficiali
+## 2. La Pipeline di Elaborazione in 5 Fasi
 
-I visualizzatori si trovano in `visualizzatori/`. Possono essere avviati singolarmente oppure affiancati al viewer ufficiale nuScenes tramite il launcher `avvia_entrambi.py`.
+La pipeline trasforma la nuvola di punti grezza del LiDAR in un verdetto di sicurezza:
 
-### Avvio Singolo (frame opzionale 1-404)
-```powershell
-.\.venv\Scripts\python.exe visualizzatori/<nome_vis>.py [frame]
 ```
-
-### Avvio Affiancato con nuScenes Explorer (sincronizzazione bidirezionale)
-```powershell
-# Sintassi generale
-.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py [frame] [--FLAG]
-
-# Esempi rapidi
-.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17               # raycasting (default)
-.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17 --inputs       # input rete neurale
-.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17 --neural       # inferenza neurale
-.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17 --bayes        # probabilita bayesiana
-.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17 --gt           # ground truth
-.\.venv\Scripts\python.exe visualizzatori/avvia_entrambi.py 17 --eval         # valutazione prestazioni
-```
-> Digita un numero di frame nel terminale del launcher per sincronizzare entrambe le finestre.
-
----
-
-### A. Raycasting Occlusioni (`vis_raycasting_occlusioni.py`)
-Mappa BEV con coni d'ombra LiDAR, strutture statiche (muri/edifici), icone ostacoli e tooltip:
-```powershell
-.\.venv\Scripts\python.exe visualizzatori/vis_raycasting_occlusioni.py [frame]
-```
-**Comandi**: `</`>`/->` naviga frame, `T` toggle aux, `Click` ispeziona zona, `S` salva HD
-
----
-
-### B. Input Multimodali Rete Neurale (`vis_input_rete_neurale.py`) - Figure 6 Tesi
-Dashboard che mostra esattamente cosa riceve la rete neurale per ogni frame:
-- **Sinistra**: Mappa BEV 25m con HD-Map, LiDAR, ombre, strutture statiche e icone ostacoli
-- **Destra**: Griglia degli **11 canali tensoriali** `(11, 200, 200)` + pesi Channel Attention (SE)
-- **Toggle "Rete Ausiliaria"**: ispezione del flusso 9 scalari -> MLP -> parametri FiLM gamma/beta
-```powershell
-.\.venv\Scripts\python.exe visualizzatori/vis_input_rete_neurale.py [frame]
-```
-**Comandi**: `</`>`/->` naviga, `T/Spazio/M` toggle rete ausiliaria, `Z/X` scorri zone ombra, `Click` ispeziona scalari FiLM, `S` salva HD
-
----
-
-### C. Inferenza Neurale Live (`vis_inferenza_neurale.py`)
-Inferenza live su GPU con classificazione TP/FP/FN/TN e barre di probabilita per classe:
-```powershell
-.\.venv\Scripts\python.exe visualizzatori/vis_inferenza_neurale.py [frame]
-```
-**Comandi**: `</`>`/->` naviga, `M/G` cambia GT (Sintetica/Reale), `R` raggio 20m/25m, `Click` ispeziona
-
----
-
-### D. Probabilita Bayesiana Condizionata (`vis_probabilita_bayes.py`)
-Approccio alternativo senza rete neurale: aggiornamento bayesiano guidato da HD Map e OBB:
-```powershell
-.\.venv\Scripts\python.exe visualizzatori/vis_probabilita_bayes.py [frame]
+[ Nuvola LiDAR 3D + Mappa HD ]
+              │
+              ▼
+  Fase 1: Space Carving & Raycasting 3D
+  Simulazione dei raggi laser nel piano polare e proiezione Bird's-Eye-View (BEV 200x200).
+              │
+              ▼
+  Fase 2: Decomposizione Poligonale & Bounding Box (OBB)
+  Isolamento dei singoli varchi d'ombra geometrici e calcolo delle dimensioni fisiche minime.
+              │
+              ▼
+  Fase 3: Estrazione Feature Multimodali per Zona
+  Ritaglio di una patch BEV a 11 canali (64x64) e calcolo di 9 descrittori topologici scalari.
+              │
+              ▼
+  Fase 4: Rete Neurale Ibrida Attention-per-Zone
+  Estrazione feature con Channel Attention (SE-Net) e modulazione FiLM dai 9 descrittori.
+              │
+              ▼
+  Fase 5: Inferenza Neuro-Simbolica & Valutazione
+  Applicazione del mascheramento logico deterministico e stima del rischio per zona d'ombra.
 ```
 
 ---
 
-### E. Ground Truth Occlusioni (`vis_ground_truth_occlusioni.py`)
-Confronto affiancato GT 3D nuScenes vs GT Neurosimbolica con regole fisiche:
+## 3. Requisiti e Configurazione Ambiente
+
+### Requisiti di Sistema
+* **Sistema Operativo**: Windows 10/11 o Linux (Ubuntu 20.04+)
+* **Python**: 3.11
+* **GPU**: NVIDIA con supporto CUDA (consigliata per addestramento veloce; l'inferenza e i visualizzatori girano anche su CPU)
+* **Dataset**: nuScenes (`v1.0-mini` per test rapidi, `v1.0-trainval` per il benchmark completo)
+
+### Installazione Dipendenze
+Apri un terminale (PowerShell o Bash) nella cartella radice del progetto:
+
 ```powershell
-.\.venv\Scripts\python.exe visualizzatori/vis_ground_truth_occlusioni.py [frame]
+# 1. Creazione ambiente virtuale (tramite venv o conda)
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# 2. Installazione librerie richieste
+pip install -r requirements.txt
 ```
 
 ---
 
-### F. Dashboard Valutazione Prestazioni (`vis_valutazione_prestazioni.py`)
-Report interattivo con metriche Precision/Recall/F1/IoU per tutti i 404 frame:
+## 4. Guida ai Comandi di Esecuzione
+
+Tutti i comandi sottostanti utilizzano l'interprete dell'ambiente virtuale (`.\.venv\Scripts\python.exe` su Windows o `python` se l'ambiente è attivato).
+
+### A. Run Completa da Zero (Pipeline End-to-End)
+Se desideri rieseguire l'intero processo da zero (estrazione zone, addestramento del modello ibrido, calibrazione soglie e benchmark):
+
 ```powershell
-.\.venv\Scripts\python.exe visualizzatori/vis_valutazione_prestazioni.py [frame]
+# Passo 1: Estrazione varchi occlusi via raycasting 3D (multiprocessing su 8 core)
+.\.venv\Scripts\python.exe estrazione_zone_occluse.py --workers 8
+
+# Passo 2: Addestramento del modello proposto (Ibrido Neuro-Simbolico)
+.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py --mode hybrid --split train --workers 8
+
+# Passo 3: Calibrazione fine delle soglie decisionali (F1 ottimizzato su train)
+.\.venv\Scripts\python.exe valutazione/calibra_soglie.py
+
+# Passo 4: Valutazione ufficiale sui 6.019 fotogrammi inediti di validazione
+.\.venv\Scripts\python.exe valutazione/evaluate_final_official.py --mode hybrid --split val
 ```
 
 ---
 
-## 🧠 3. Addestramento del Modello
+### B. Addestramento dei Modelli per Studio Comparativo (Ablazione)
+Per confrontare le prestazioni del modello ibrido con le varianti di controllo descritte nella tesi:
 
-### A. Addestramento Ufficiale su Ground Truth Sintetica Neurosimbolica
-Addestra `AttentionPerZoneModel` con Channel Attention (SE) e Modulazione FiLM per 20 epoche su GPU. Salva in `pesi_modelli/per_zone_checkpoint_attention_neuro_hybrid.pth`:
 ```powershell
-.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py
-```
+# 1. Modello Proposto (Ibrido Neuro-Simbolico su GT Spazio-Semantica)
+.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py --mode hybrid
 
-### B. Addestramento di Baseline su Ground Truth Reale nuScenes (Ablation Study)
-Addestra la medesima architettura supervisionata unicamente dai box 3D annotati fisicamente visibili:
-```powershell
-.\.venv\Scripts\python.exe addestramento/train_per_zone_real_gt.py
-```
+# 2. Modello Ablation Puro (Senza Vincoli Fisici Neuro-Simbolici)
+.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py --mode pure_neural
 
----
+# 3. Baseline Reale (Addestrato esclusivamente sui box 3D annotati da annotatori umani)
+.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py --mode real
 
-## 📊 4. Valutazione e Benchmark Ufficiale
-
-### A. Valutazione del Modello Ufficiale su Dataset Completo
-Calcola le metriche certificate ($TP, FP, FN$, Precision, Recall, F1-Score, IoU) su tutti i 404 fotogrammi nuScenes per entrambe le Ground Truth e per entrambi i raggi operativi (20m e 25m):
-```powershell
-.\.venv\Scripts\python.exe valutazione/evaluate_final_official.py
-```
-
-### B. Studio di Ablazione sulla Supervisione (GT Reale vs GT Neurosimbolica)
-Confronta in un unico report le metriche dei due modelli addestrati a 25 metri:
-```powershell
-.\.venv\Scripts\python.exe valutazione/evaluate_training_supervision_ablation.py
+# 4. Addestramento di tutte le varianti in sequenza
+.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py --mode all
 ```
 
 ---
 
-## 🤖 5. Inferenza Batch dell'Agente Neurale
-Genera i file JSON probabilistici di tutte le zone occluse per tutti i fotogrammi del dataset utilizzando il modello caricato da `pesi_modelli/`:
+### C. Valutazione e Benchmark Ufficiale
+Lo script di valutazione confronta automaticamente ciascun modello sia con la **Ground Truth Reale** (oggetti fisicamente nascosti) sia con la **Ground Truth Ibrida** (affordance potenziale di transito):
+
 ```powershell
-.\.venv\Scripts\python.exe inferenza_agenti/neural_agent.py
+# Valutazione solo del Modello Ibrido su split di validazione (150 scene mai viste)
+.\.venv\Scripts\python.exe valutazione/evaluate_final_official.py --mode hybrid --split val
+
+# Valutazione comparativa completa (Tutti i modelli insieme per generare la tabella comparativa)
+.\.venv\Scripts\python.exe valutazione/evaluate_final_official.py --mode all --split val
 ```
+
+---
+
+## 5. File Generati in Automatico dopo la Valutazione
+
+Al termine dell'esecuzione di `evaluate_final_official.py`, il sistema genera automaticamente due file fondamentali:
+
+1. **`documentazione/RISULTATI_VALUTAZIONE_VAL.md`** (o `RISULTATI_VALUTAZIONE_ALL.md`):
+   * Contiene le tabelle comparative formattate in Markdown con Precision, Recall e F1-Score per ciascun modello, disaggregate per categoria semantica (Auto, Camion/Bus, VRU) e per raggio di distanza (10m, 15m, 20m, 25m).
+2. **`valutazione/cache_valutazione_val.json`**:
+   * File di cache contenente le predizioni, i verdetti di sicurezza (True Positive, False Positive, False Negative) e i punteggi di confidenza per ogni singola zona occlusa analizzata. Questa cache alimenta i visualizzatori grafici senza richiedere ricalcoli.
+
+---
+
+## 6. Suite dei Visualizzatori Grafici Interattivi
+
+I visualizzatori permettono di ispezionare visivamente ciò che accade in ogni frame:
+
+```powershell
+# 1. Raycasting e Coni d'Ombra (Mappa BEV con varchi d'ombra e strutture urbane)
+.\.venv\Scripts\python.exe visualizzatori/vis_raycasting_occlusioni.py 17
+
+# 2. Input Multimodali Rete Neurale (Mostra i canali BEV e i 9 descrittori scalari FiLM)
+.\.venv\Scripts\python.exe visualizzatori/vis_input_rete_neurale.py 17
+
+# 3. Inferenza Neurale Live (Mappa delle probabilità stimate per ogni zona d'ombra)
+.\.venv\Scripts\python.exe visualizzatori/vis_inferenza_neurale.py 17
+
+# 4. Ground Truth Duale a Confronto (GT Reale 3D vs GT Sintetica Ibrida)
+.\.venv\Scripts\python.exe visualizzatori/vis_ground_truth_occlusioni.py 17
+
+# 5. Dashboard di Valutazione Prestazioni (Verdetti TP, FP, FN con box comparativi)
+.\.venv\Scripts\python.exe visualizzatori/vis_valutazione_prestazioni.py 17
+
+# 6. Ispezione Dati Grezzi nuScenes (LiDAR 3D + telecamere surround sincronizzate)
+.\.venv\Scripts\python.exe visualizzatori/vis_nuscenes_raw.py 17
+```
+
+### Controlli da Tastiera nei Visualizzatori:
+* `Freccia Destra (->)` / `Freccia Sinistra (<-)`: Avanza o retrocede di un fotogramma.
+* `Click Sinistro` su una zona: Mostra nel pannello laterale i dettagli analitici (probabilità, dimensioni, classi predette).
+* `T`: Attiva/disattiva livelli grafici ausiliari (overlay semantici della mappa HD).
+* `S`: Salva uno screenshot ad alta risoluzione del fotogramma corrente.

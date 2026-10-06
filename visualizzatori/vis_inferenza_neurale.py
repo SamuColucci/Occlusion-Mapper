@@ -1,4 +1,3 @@
-# ==============================================================================
 # VISUALIZZATORE UFFICIALE TESI - INFERENZA NEURALE & ANTICIPAZIONE RISCHIO (BEV NUSCENES)
 # File: visualizzatori/vis_inferenza_neurale.py
 #
@@ -13,7 +12,7 @@
 # - OSTACOLI PREDETTI DAL MODELLO (in ombra): TUTTI I CORRISPETTIVI OGGETTI SONO
 #   COLORATI DI ROSSO (Auto Rossa, Camion Rosso, Pedone Rosso, Barriera Rossa)
 #   così da rendere la separazione percettiva immediata ed inequivocabile!
-# ==============================================================================
+
 
 import os
 import sys
@@ -53,44 +52,44 @@ VOXEL_SIZE = 0.4
 
 MODEL_CONFIGS = {
     "NEURO_SIMB": {
-        "title": "Anticipazione Neuro-Simbolica Ibrida (Spazio 3D + HD-Map)",
-        "short": "★ IBRIDO (SPAZIO+HDMAP)",
+        "title": "Supervisione Ibrida: Rete con Vincoli Simbolici (Proposto)",
+        "short": "★ IBRIDO (CON VINCOLI)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
         "badge_color": "#2563EB",
         "badge_bg": "#DBEAFE",
     },
-    "GEOMETRIC": {
-        "title": "Supervisione Geometrica (Fitting 3D)",
-        "short": "★ GEOMETRICO (FITTING 3D)",
-        "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_geometric.pth"),
-        "badge_color": "#0284C7",
-        "badge_bg": "#E0F2FE",
-    },
-    "SEMANTIC": {
-        "title": "Supervisione Semantica (Regole Naïve HD-Map)",
-        "short": "★ SEMANTICO (REGOLE HDMAP)",
-        "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_semantic.pth"),
-        "badge_color": "#E11D48",
-        "badge_bg": "#FFF1F2",
+    "PURE_NEURAL": {
+        "title": "Supervisione Ibrida: Studio di Ablazione Senza Vincoli Simbolici",
+        "short": "IBRIDO (SENZA VINCOLI)",
+        "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_pure_neural.pth"),
+        "badge_color": "#475569",
+        "badge_bg": "#F1F5F9",
     },
     "REAL_GT": {
-        "title": "Supervisione Reale Completa (nuScenes 3D)",
-        "short": "GT REALE (COMPLETA)",
+        "title": "Supervisione Reale (nuScenes 3D) con Vincoli Simbolici",
+        "short": "REALE (CON VINCOLI)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth"),
         "badge_color": "#0D9488",
         "badge_bg": "#CCFBF1",
     },
+    "REAL_PURE_NEURAL": {
+        "title": "Supervisione Reale: Studio di Ablazione Senza Vincoli Simbolici",
+        "short": "REALE (SENZA VINCOLI)",
+        "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_pure_neural.pth"),
+        "badge_color": "#0F766E",
+        "badge_bg": "#E6FFFA",
+    },
     "POS_ONLY": {
-        "title": "Supervisione Solo Zone Piene (Positives-Only)",
-        "short": "SOLO POSITIVI (ZONE PIENE)",
+        "title": "Supervisione Reale: Sole Zone Piene (Positives-Only)",
+        "short": "REALE (SOLO PIENE)",
         "ckpt": os.path.join("pesi_modelli", "per_zone_checkpoint_attention_positive_only.pth"),
         "badge_color": "#D97706",
         "badge_bg": "#FEF3C7",
     }
 }
 MODEL_CONFIGS["HYBRID"] = MODEL_CONFIGS["NEURO_SIMB"]
-MODEL_CONFIGS["GEOMETRICA"] = MODEL_CONFIGS["GEOMETRIC"]
-MODEL_CONFIGS["SEMANTICA"] = MODEL_CONFIGS["SEMANTIC"]
+MODEL_CONFIGS["NO_NEURO"] = MODEL_CONFIGS["PURE_NEURAL"]
+MODEL_CONFIGS["REAL_NO_NEURO"] = MODEL_CONFIGS["REAL_PURE_NEURAL"]
 
 
 def percorso_ckpt(model_key):
@@ -125,12 +124,12 @@ class NeuralInferenceVisualizer:
         init_key = initial_model.upper()
         if init_key in ["HYBRID", "IBRIDO", "NEURO_SIMB", "NEURO"]:
             self.current_model_key = "NEURO_SIMB"
-        elif init_key in ["GEOMETRIC", "GEOMETRICA", "GEOM"]:
-            self.current_model_key = "GEOMETRIC"
-        elif init_key in ["SEMANTIC", "SEMANTICA", "SEM"]:
-            self.current_model_key = "SEMANTIC"
+        elif init_key in ["PURE_NEURAL", "NO_NEURO", "PURO", "SENZA_SIMB"]:
+            self.current_model_key = "PURE_NEURAL"
         elif init_key in ["REAL", "REALE", "REAL_GT"]:
             self.current_model_key = "REAL_GT"
+        elif init_key in ["REAL_PURE_NEURAL", "REAL_NO_NEURO", "REALE_PURO"]:
+            self.current_model_key = "REAL_PURE_NEURAL"
         elif init_key in ["POS", "POSITIVES", "POS_ONLY", "SOLO_POSITIVI"]:
             self.current_model_key = "POS_ONLY"
         else:
@@ -366,7 +365,7 @@ class NeuralInferenceVisualizer:
         input_tensor = torch.tensor(np.stack(input_channels, axis=0), dtype=torch.float32)
 
         start_time = time.perf_counter()
-        cat_names_4 = ["Auto", "Camion/Bus", "VRU (Pedoni)", "Barriera"]
+        cat_names_4 = ["Auto", "Camion/Bus", "VRU (Pedoni)"]
 
         # Mappa delle distanze euclidee dalla carreggiata (drivable area) in metri
         import cv2
@@ -454,20 +453,21 @@ class NeuralInferenceVisualizer:
                 # Vettore scalari: [area, dist, width, length, road_f, side_f, cross_f, roadside_f, terr_f]
                 scalars = torch.tensor([[area, dist, obb_w, obb_l, road_f, side_f, cross_f, roadside_f, terr_f]], dtype=torch.float32).to(self.device)
 
-                occluder_mask = AttentionPerZoneModel.build_compatibility_mask(
-                    occ_name, occ_wlh, road_f=road_f, roadside_f=roadside_f, device=self.device
-                )
+                if self.current_model_key in ["PURE_NEURAL", "REAL_PURE_NEURAL", "NO_NEURO", "REAL_NO_NEURO"]:
+                    occluder_mask = None
+                else:
+                    occluder_mask = AttentionPerZoneModel.build_compatibility_mask(
+                        occ_name, occ_wlh, road_f=road_f, roadside_f=roadside_f, device=self.device
+                    )
                 with torch.no_grad():
                     out_6 = torch.sigmoid(model(patch_res, scalars, occluder_mask=occluder_mask)).squeeze(0).cpu().numpy()
 
-                # Mappatura pura dell'output del modello a 4 macro-classi (nessuna modifica post-hoc)
+                # Mappatura pura dell'output del modello a 3 macro-classi (escluse barriere)
                 p4 = np.array([
                     out_6[0],
                     out_6[1],
-                    max(out_6[2], out_6[3], out_6[4]),
-                    out_6[5]
+                    max(out_6[2], out_6[3], out_6[4])
                 ], dtype=np.float32)
-
 
                 max_class_idx = int(np.argmax(p4))
                 max_prob = float(p4[max_class_idx])
@@ -560,9 +560,8 @@ class NeuralInferenceVisualizer:
         c_static_face = '#EF4444' # Strutture statiche (Rosso)
         c_static_edge = '#B91C1C' # Bordo tratteggiato strutture statiche (Rosso scuro)
 
-        # =====================================================================
         # 1. PANNELLO SINISTRO: MAPPA BEV AD ALTA FEDELTÀ (25M)
-        # =====================================================================
+
         ax_map.set_facecolor(c_map_bg)
         ax_map.set_xlim(-self.max_range, self.max_range)
         ax_map.set_ylim(-self.max_range, self.max_range)
@@ -624,13 +623,12 @@ class NeuralInferenceVisualizer:
                 ax_map.scatter(pts_r[:, 0], pts_r[:, 1], s=1.1, c='#0F172A',
                                alpha=0.68, zorder=3, edgecolors='none')
 
-        # Conteggi operativi per il grafico analitico
-        counts_visibili = {"Auto": 0, "Camion/Bus": 0, "VRU (Pedoni)": 0, "Barriere": 0}
-        counts_pred = {"Auto": 0, "Camion/Bus": 0, "VRU (Pedoni)": 0, "Barriere": 0}
+        # Conteggi operativi per il grafico analitico (3 macro-classi dinamiche)
+        counts_visibili = {"Auto": 0, "Camion/Bus": 0, "VRU (Pedoni)": 0}
+        counts_pred = {"Auto": 0, "Camion/Bus": 0, "VRU (Pedoni)": 0}
 
-        # ---------------------------------------------------------------------
         # F. ZONE OCCLUSE & OSTACOLI PREDETTI DAL MODELLO (TUTTI ROSSI!)
-        # ---------------------------------------------------------------------
+
         for meta in self.inferred_occlusions:
             poly_xy = meta["poly_xy"]
             risk = meta["risk_score"]
@@ -672,15 +670,11 @@ class NeuralInferenceVisualizer:
                     counts_pred["Camion/Bus"] += 1
                     self.draw_icon_object(ax_map, 'truck_red', center=[cx, cy], length=5.5, deg=0.0)
                     h_off = 3.1
-                elif "VRU" in pred_cls:
+                else:
                     counts_pred["VRU (Pedoni)"] += 1
                     self.draw_icon_object(ax_map, 'pedestrian_red', center=[cx, cy], length=2.8, deg=0.0,
                                           halo_color='#FEE2E2', halo_radius=1.5)
                     h_off = 1.8
-                else:
-                    counts_pred["Barriere"] += 1
-                    self.draw_icon_object(ax_map, 'barrier_red', center=[cx, cy], length=2.2, deg=0.0)
-                    h_off = 1.5
 
                 # Badge percentuale compatto sopra all'oggetto rosso
                 b_bg = '#DC2626' if risk >= 0.40 else ('#EA580C' if risk >= 0.20 else '#475569')
@@ -703,9 +697,8 @@ class NeuralInferenceVisualizer:
                 'default_z': 5
             })
 
-        # ---------------------------------------------------------------------
         # F2. STRUTTURE STATICHE MAN-MADE (Muri / Edifici rilevati da clustering LiDAR)
-        # ---------------------------------------------------------------------
+
         for sb in getattr(self, 'static_boxes', []):
             c_x = (sb.min_x + sb.max_x) / 2.0
             c_y = (sb.min_y + sb.max_y) / 2.0
@@ -717,9 +710,8 @@ class NeuralInferenceVisualizer:
                                  linewidth=1.8, linestyle='--', alpha=0.45, zorder=6)
                 ax_map.add_patch(rect)
 
-        # ---------------------------------------------------------------------
         # G. OSTACOLI REALI NUSCENES (VISIBILI AL LIDAR) - STILE UGUALE A VIS_NUSCENES_RAW
-        # ---------------------------------------------------------------------
+
         boxes = self.frame_data.get('boxes', [])
 
         # Rilevamento intelligente TIR articolati
@@ -795,7 +787,6 @@ class NeuralInferenceVisualizer:
                 self.draw_icon_object(ax_map, 'motorcycle_amber', center=center_xy, length=2.6, deg=0.0,
                                       flip_h=flip, halo_color='#FDE68A', halo_radius=1.5)
             elif "barrier" in b_name:
-                counts_visibili["Barriere"] += 1
                 self.draw_icon_object(ax_map, 'barrier_hazard', center=center_xy, length=2.2, deg=0.0)
             elif "pushable" in b_name or "pullable" in b_name:
                 self.draw_icon_object(ax_map, 'cart_trolley', center=center_xy, length=2.2, deg=0.0)
@@ -824,9 +815,8 @@ class NeuralInferenceVisualizer:
         )
         self.tooltip.set_visible(False)
 
-        # =====================================================================
         # 2. PANNELLO DESTRA ALTO: TELEMETRIA EGO VEHICLE & METADATI INFERENZA
-        # =====================================================================
+
         ax_telemetry.set_facecolor('#F8FAFC')
         for spine in ax_telemetry.spines.values():
             spine.set_color(c_border)
@@ -883,9 +873,8 @@ class NeuralInferenceVisualizer:
         ax_telemetry.set_xticks([])
         ax_telemetry.set_yticks([])
 
-        # =====================================================================
         # 3. PANNELLO DESTRA CENTRO: CONFRONTO OSTACOLI VISIBILI VS OCCLUSI ANTICIPATI
-        # =====================================================================
+
         ax_objects.set_facecolor('#FFFFFF')
         for spine in ax_objects.spines.values():
             spine.set_color(c_border)
@@ -893,9 +882,9 @@ class NeuralInferenceVisualizer:
         ax_objects.spines['top'].set_visible(False)
         ax_objects.spines['right'].set_visible(False)
 
-        cat_labels = ["Auto", "Camion/Bus", "VRU (Pedoni)", "Barriere"]
-        y_vis = [counts_visibili["Auto"], counts_visibili["Camion/Bus"], counts_visibili["VRU (Pedoni)"], counts_visibili["Barriere"]]
-        y_pred = [counts_pred["Auto"], counts_pred["Camion/Bus"], counts_pred["VRU (Pedoni)"], counts_pred["Barriere"]]
+        cat_labels = ["Auto", "Camion/Bus", "VRU (Pedoni)"]
+        y_vis = [counts_visibili["Auto"], counts_visibili["Camion/Bus"], counts_visibili["VRU (Pedoni)"]]
+        y_pred = [counts_pred["Auto"], counts_pred["Camion/Bus"], counts_pred["VRU (Pedoni)"]]
 
         x_ind = np.arange(len(cat_labels))
         width = 0.35
@@ -941,9 +930,8 @@ class NeuralInferenceVisualizer:
                 ax_objects.text(bar.get_x() + bar.get_width()/2.0, h + 0.25, str(int(h)),
                                 ha='center', va='bottom', fontsize=8.5, fontweight='bold', color='#DC2626')
 
-        # =====================================================================
         # 4. PANNELLO DESTRA BASSO: LEGENDA UFFICIALE (VISIBILI vs PREDETTI ROSSI)
-        # =====================================================================
+
         ax_legend.set_facecolor('#FFFFFF')
         for spine in ax_legend.spines.values():
             spine.set_color(c_border)
@@ -1014,9 +1002,8 @@ class NeuralInferenceVisualizer:
             ax_legend.text(0.670, cur_y, it[3], transform=ax_legend.transAxes,
                            fontsize=7.2, color=c_border, va='center', fontweight='medium')
 
-        # =====================================================================
         # 5. MENU A TENDINA & CASELLA DI SALTO FRAME IN ALTO
-        # =====================================================================
+
         ax_dd = self.fig.add_axes([0.565, 0.938, 0.280, 0.036])
         arrow = "▲" if getattr(self, 'dropdown_open', False) else "▼"
         curr_lbl = cfg_curr.get("short", self.current_model_key)
@@ -1046,9 +1033,8 @@ class NeuralInferenceVisualizer:
 
         self.fig.canvas.draw_idle()
 
-    # =========================================================================
     # GESTIONE MENU A TENDINA PER SELEZIONE DEI 4 MODELLI
-    # =========================================================================
+
     def toggle_dropdown(self, event=None):
         self.dropdown_open = not getattr(self, 'dropdown_open', False)
         if self.dropdown_open:
@@ -1068,11 +1054,11 @@ class NeuralInferenceVisualizer:
             spine.set_linewidth(1.3)
 
         modes = [
-            ("NEURO_SIMB", "1. ★ Modello Ibrido (Spazio 3D + HD-Map)"),
-            ("GEOMETRIC", "2. ★ Modello Geometrico (Fitting 3D)"),
-            ("SEMANTIC", "3. ★ Modello Semantico (Regole Naïve)"),
-            ("REAL_GT", "4. Modello GT Reale (Supervisione Completa)"),
-            ("POS_ONLY", "5. Modello Solo Positivi (Zone Piene)")
+            ("NEURO_SIMB", "1. ★ Ibrido Con Vincoli (Proposto)"),
+            ("PURE_NEURAL", "2. Ibrido Senza Vincoli (Ablazione)"),
+            ("REAL_GT", "3. Reale Con Vincoli Simbolici"),
+            ("REAL_PURE_NEURAL", "4. Reale Senza Vincoli (Ablazione)"),
+            ("POS_ONLY", "5. Reale Solo Zone Piene")
         ]
 
         y_offsets = [0.148, 0.111, 0.074, 0.037, 0.001]
@@ -1147,7 +1133,7 @@ class NeuralInferenceVisualizer:
             if self.current_idx > 0:
                 self.load_frame(self.current_idx - 1, broadcast=True)
         elif event.key in ['m', 'M', 'b', 'B']:
-            cycle = ["NEURO_SIMB", "GEOMETRIC", "SEMANTIC", "REAL_GT", "POS_ONLY"]
+            cycle = ["NEURO_SIMB", "PURE_NEURAL", "REAL_GT", "REAL_PURE_NEURAL", "POS_ONLY"]
             cur_i = cycle.index(self.current_model_key) if self.current_model_key in cycle else 0
             next_m = cycle[(cur_i + 1) % len(cycle)]
             self.select_model(next_m)
@@ -1272,9 +1258,9 @@ def main():
     parser = argparse.ArgumentParser(description="Visualizzatore Tesi Inferenza Neurale nelle Zone Occluse")
     parser.add_argument("frame", nargs="?", type=int, default=1, help="Numero del frame iniziale (1-404)")
     parser.add_argument("--model", "-m",
-                        choices=["NEURO_SIMB", "GEOMETRIC", "SEMANTIC", "GEOMETRICA", "SEMANTICA", "REAL_GT", "POS_ONLY", "HYBRID"],
+                        choices=["NEURO_SIMB", "HYBRID", "PURE_NEURAL", "REAL_GT", "REAL_PURE_NEURAL", "POS_ONLY"],
                         default="NEURO_SIMB",
-                        help="Modello neurale iniziale da caricare ('NEURO_SIMB', 'GEOMETRIC', 'SEMANTIC', 'REAL_GT', 'POS_ONLY')")
+                        help="Modello neurale iniziale ('NEURO_SIMB', 'PURE_NEURAL', 'REAL_GT', 'REAL_PURE_NEURAL', 'POS_ONLY')")
     parser.add_argument("--save", action="store_true", help="Salva screenshot ad alta risoluzione 300 DPI ed esce")
     args = parser.parse_args()
 

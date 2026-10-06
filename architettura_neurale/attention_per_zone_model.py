@@ -235,7 +235,8 @@ class AttentionPerZoneModel(nn.Module):
           In zone 100% terreno o pedonali isolate da strade, Auto, Camion e Moto vengono categoricamente escluse.
         """
         # [Auto(0), Camion(1), Pedone(2), Moto(3), Bici(4), Barriera(5)]
-        mask = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        # La classe Barriera (5) e' disattivata (0.0): arredi fissi esclusi dalle classi di traffico dinamico
+        mask = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
         if occluder_name is not None or occluder_wlh is not None:
             name_l = str(occluder_name).lower() if occluder_name is not None else ""
             occ_h = float(occluder_wlh[2]) if (occluder_wlh is not None and len(occluder_wlh) >= 3) else None
@@ -252,7 +253,7 @@ class AttentionPerZoneModel(nn.Module):
                 mask = [0.0, 0.0, 1.0, 0.0, 1.0, 0.0]
             elif not (is_heavy or is_manmade or is_tall):
                 # Berlina molto bassa (h < 1.50m): quota LiDAR a 1.84m esclude fisicamente Camion/Bus (1)
-                mask = [1.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+                mask = [1.0, 0.0, 1.0, 1.0, 1.0, 0.0]
 
         # Vincolo di Affordance Semantica (HD-Map): Veicoli ammessi solo su asfalto o accosto al cordolo
         if road_f is not None and roadside_f is not None:
@@ -268,8 +269,8 @@ class AttentionPerZoneModel(nn.Module):
 
     def forward_vru(self, patch: torch.Tensor, scalars: torch.Tensor, occluder_mask: torch.Tensor = None) -> torch.Tensor:
         """
-        Output calibrato a 4 macro-classi con vincolo neuro-simbolico incorporato:
-        [0: Auto, 1: Camion/Bus, 2: VRU (Pedoni+Moto+Bici), 3: Barriera]
+        Output calibrato a 3 macro-classi con vincolo neuro-simbolico incorporato:
+        [0: Auto, 1: Camion/Bus, 2: VRU (Pedoni+Moto+Bici)]
         """
         # Esegue il forward pass e ottiene i punteggi finali mascherati
         logits_6 = self.forward(patch, scalars, occluder_mask=occluder_mask)
@@ -277,6 +278,6 @@ class AttentionPerZoneModel(nn.Module):
         probs_6 = torch.sigmoid(logits_6)
         # Prende le probabilità delle 3 classi VRU e ne fa il massimo per ottenere un'unica probabilità per la macro-classe VRU
         probs_vru = torch.max(probs_6[:, 2:5], dim=1, keepdim=True)[0]
-        # Unisce le probabilità delle 4 macro-classi
-        probs_4 = torch.cat([probs_6[:, 0:2], probs_vru, probs_6[:, 5:6]], dim=1)
-        return probs_4
+        # Unisce le probabilità delle 3 macro-classi
+        probs_3 = torch.cat([probs_6[:, 0:2], probs_vru], dim=1)
+        return probs_3

@@ -1,4 +1,3 @@
-# ==============================================================================
 # VISUALIZZATORE UFFICIALE NUSCENES (NU-SCENES DEVKIT EXPLORER INTERATTIVO)
 # File: visualizzatori/vis_official_nuscenes.py
 #
@@ -25,7 +24,7 @@
 #   [Up / Down]: Salto alla scena successiva / precedente
 #   [1] / [2] / [3]: Cambio modalità di visualizzazione
 #   [S]: Salva screenshot HD ad alta risoluzione in documentazione/immagini_tesi/
-# ==============================================================================
+
 
 import os
 import sys

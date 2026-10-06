@@ -15,22 +15,24 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
 
-CATEGORIE = ["Auto", "Camion/Bus", "VRU", "Barriera"]
+CATEGORIE = ["Auto", "Camion/Bus", "VRU"]
 
 # Modello -> (checkpoint, cartella dei blocchi con la GT di addestramento)
 MODELLI = {
     "hybrid": ("per_zone_checkpoint_attention_neuro_hybrid.pth", "cached_dataset_neuro_hybrid_train_blocchi"),
+    "pure_neural": ("per_zone_checkpoint_attention_pure_neural.pth", "cached_dataset_neuro_hybrid_train_blocchi"),
     "real": ("per_zone_checkpoint_attention_real_gt.pth", "cached_dataset_per_zone_train_blocchi"),
+    "real_pure_neural": ("per_zone_checkpoint_attention_real_pure_neural.pth", "cached_dataset_per_zone_train_blocchi"),
     "positives_only": ("per_zone_checkpoint_attention_positive_only.pth", "cached_dataset_per_zone_train_blocchi"),
 }
 
 # Vincoli sull'area identici a quelli di evaluate_final_official.py
-AREA_MINIMA = [3.5, 8.0, 0.0, 0.0]
+AREA_MINIMA = [3.5, 8.0, 0.0]
 
 
-# Riduce le 6 classi della rete alle 4 macro-classi usate in valutazione (VRU = massimo delle classi 2-4)
+# Riduce le 6 classi della rete alle 3 macro-classi usate in valutazione (VRU = massimo delle classi 2-4)
 def a_macro_classi(x: np.ndarray) -> np.ndarray:
-    return np.stack([x[:, 0], x[:, 1], x[:, 2:5].max(axis=1), x[:, 5]], axis=1)
+    return np.stack([x[:, 0], x[:, 1], x[:, 2:5].max(axis=1)], axis=1)
 
 
 # Soglia che massimizza l'F1 su una griglia regolare, applicando lo stesso vincolo d'area della valutazione
@@ -83,9 +85,10 @@ def main():
             # le soglie si calibrano quindi sull'insieme completo delle zone
             with torch.no_grad():
                 for i in range(0, len(targets), 1024):
+                    mask_in = None if chiave in ["pure_neural", "real_pure_neural"] else dati["masks"][i:i + 1024].to(device)
                     logits = model(dati["patches"][i:i + 1024].float().to(device),
                                    dati["scalars"][i:i + 1024].to(device),
-                                   occluder_mask=dati["masks"][i:i + 1024].to(device))
+                                   occluder_mask=mask_in)
                     prob_l.append(torch.sigmoid(logits).cpu().numpy())
             vero_l.append(targets.numpy())
             area_l.append(dati["scalars"][:, 0].numpy())

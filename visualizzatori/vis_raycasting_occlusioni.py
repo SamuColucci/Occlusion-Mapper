@@ -1,4 +1,3 @@
-# ==============================================================================
 # VISUALIZZATORE UFFICIALE TESI - CALCOLO OCCLUSIONI RAYCASTING (NUSCENES BEV)
 # File: visualizzatori/vis_raycasting_occlusioni.py
 #
@@ -14,7 +13,7 @@
 # - DESTRA AL CENTRO: Istogramma conteggio ostacoli reali per categoria entro 25m;
 # - DESTRA IN BASSO: Simbologia e legenda ufficiale (nuScenes 3D, sensori e layer);
 # - CONTROLLI: Frecce DESTRA/SINISTRA per scorrere i frame, 'S' per salvare a 300 DPI.
-# ==============================================================================
+
 
 import os
 import sys
@@ -36,13 +35,17 @@ from raycaster.ray_caster import RayCaster
 SYNC_FILE = os.path.join(ROOT_DIR, "scratch", "sync_frame.txt")
 
 class PaperStyleVisualizer:
-    def __init__(self, max_range=25.0):
+    def __init__(self, max_range=25.0, dataroot=None, occlusions_dir=None):
         print("\n" + "=" * 80)
         print("   VISUALIZZATORE TESI: DATASET NUSCENES & SENSORI (STILE PAPER SCIENTIFICO)")
         print("=" * 80)
 
         self.max_range = float(max_range)
-        self.adapter = create_adapter("nuscenes", "./nuscenes")
+        if dataroot is None:
+            dataroot = "./nuscenes" if os.path.exists("./nuscenes") else "D:/nuScenes"
+        self.dataroot = os.path.abspath(dataroot)
+        self.occlusions_dir = os.path.abspath(occlusions_dir) if occlusions_dir else None
+        self.adapter = create_adapter("nuscenes", self.dataroot)
         self.total_frames = self.adapter.get_num_samples()
         self.current_idx = 0
 
@@ -136,10 +139,21 @@ class PaperStyleVisualizer:
             self.scene_name = 'scene-0061'
             self.location = 'singapore-onenorth'
 
-        # Carica occlusioni reali da raycasting
-        occ_file = os.path.join("extracted_occlusions", f"{self.token}.json")
+        # Carica occlusioni reali da raycasting (cerca nella dir configurata, poi fallback)
+        candidate_dirs = []
+        if self.occlusions_dir:
+            candidate_dirs.append(self.occlusions_dir)
+        candidate_dirs.extend(["extracted_occlusions", "D:/extracted_occlusions"])
+        
+        occ_file = None
+        for d in candidate_dirs:
+            p = os.path.join(d, f"{self.token}.json")
+            if os.path.exists(p):
+                occ_file = p
+                break
+
         self.occlusions = []
-        if os.path.exists(occ_file):
+        if occ_file and os.path.exists(occ_file):
             try:
                 with open(occ_file) as f:
                     self.occlusions = json.load(f).get("occlusions", [])
@@ -177,9 +191,8 @@ class PaperStyleVisualizer:
         except Exception:
             pass
 
-    # =========================================================================
     # RENDERING CON ICONE VETTORIALI STILIZZATE E MINIMALI (STILE PROVA 1)
-    # =========================================================================
+
     def draw_icon_object(self, ax, icon_name, center, length, deg=0.0, width=None,
                          flip_h=False, halo_color=None, halo_radius=None):
         """Disegna un'icona raster/vettoriale trasparente ruotata e scalata preservando le proporzioni naturali."""
@@ -231,9 +244,8 @@ class PaperStyleVisualizer:
                       f"Figure 2: Mappa BEV Raycasting & Calcolo Coni d'Ombra (Raggio {int(self.max_range)}m)",
                       fontsize=11.5, fontweight='bold', color='#0F172A', ha='left', va='center')
 
-        # =====================================================================
         # 1. PANNELLO SINISTRO: MAPPA BEV VETTORIALE NUSCENES
-        # =====================================================================
+
         c_map_bg = '#F8FAFC'      # Sfondo chiaro pulito
         c_grid = '#E2E8F0'        # Quadrettatura cartesiana
         c_border = '#0F172A'      # Assi e cerchi neri netti
@@ -516,9 +528,8 @@ class PaperStyleVisualizer:
         )
         self.tooltip.set_visible(False)
 
-        # =====================================================================
         # 2. PANNELLO DESTRA ALTO: TELEMETRIA EGO VEHICLE & METADATI SCENA
-        # =====================================================================
+
         ax_telemetry.set_facecolor('#F8FAFC')
         for spine in ax_telemetry.spines.values():
             spine.set_color(c_border)
@@ -556,9 +567,8 @@ class PaperStyleVisualizer:
         ax_telemetry.set_xticks([])
         ax_telemetry.set_yticks([])
 
-        # =====================================================================
         # 3. PANNELLO DESTRA CENTRO: CONTEGGIO OSTACOLI REALI NEL RAGGIO VISIVO
-        # =====================================================================
+
         ax_objects.set_facecolor('#FFFFFF')
         for spine in ax_objects.spines.values():
             spine.set_color(c_border)
@@ -591,9 +601,8 @@ class PaperStyleVisualizer:
             ax_objects.text(bar.get_x() + bar.get_width()/2.0, val + 0.3, str(val),
                             ha='center', va='bottom', fontsize=9.5, fontweight='bold', color=c_border)
 
-        # =====================================================================
         # 4. PANNELLO DESTRA BASSO: LEGENDA UFFICIALE & SIMBOLOGIA ICONE
-        # =====================================================================
+
         ax_legend.set_facecolor('#FFFFFF')
         for spine in ax_legend.spines.values():
             spine.set_color(c_border)
@@ -843,8 +852,14 @@ class PaperStyleVisualizer:
     def on_jump_frame(self, text):
         try:
             val = int(text.strip())
-            target = (val - 1) if 1 <= val <= self.total_frames else val
-            if 0 <= target < self.total_frames and target != self.current_idx:
+            if val < 1:
+                target = 0
+            elif val > self.total_frames:
+                target = self.total_frames - 1
+                print(f"[INFO] Frame inserito ({val}) superiore al massimo ({self.total_frames}). Caricato frame finale {self.total_frames}.")
+            else:
+                target = val - 1
+            if target != self.current_idx:
                 self.load_frame(target, broadcast=True)
         except ValueError:
             pass
@@ -880,9 +895,11 @@ if __name__ == "__main__":
     parser.add_argument("--save", action="store_true", help="Salva immediatamente a 300 DPI ed esce")
     parser.add_argument("--frame", type=int, default=None, help="Indice del frame iniziale")
     parser.add_argument("--range", "-r", type=float, default=25.0, help="Raggio di visualizzazione in metri (default: 25.0)")
+    parser.add_argument("--dataroot", type=str, default=None, help="Percorso dataset nuScenes (default: ./nuscenes o D:/nuScenes)")
+    parser.add_argument("--occlusions_dir", type=str, default=None, help="Cartella contenente i JSON di raycasting (default: extracted_occlusions o D:/extracted_occlusions)")
     args = parser.parse_args()
 
-    app = PaperStyleVisualizer(max_range=args.range)
+    app = PaperStyleVisualizer(max_range=args.range, dataroot=args.dataroot, occlusions_dir=args.occlusions_dir)
     init_f = args.frame_pos if args.frame_pos is not None else args.frame
     if init_f is not None:
         target = (init_f - 1) if init_f >= 1 and args.frame_pos is not None else init_f

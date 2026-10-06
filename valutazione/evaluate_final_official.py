@@ -41,41 +41,45 @@ from shapely.geometry import Point as ShapelyPoint, Polygon as ShapelyPoly
 GRID_DIM = 200        # 200x200 pixel BEV
 GRID_RANGE = 40.0     # [-40m, +40m]
 VOXEL_SIZE = 0.4      # 0.4 m/pixel
-CATEGORIES = ["Auto", "Camion/Bus", "VRU (Pedoni/Bici)", "Barriera"]
+CATEGORIES = ["Auto", "Camion/Bus", "VRU (Pedoni/Bici)"]
 RADII = [20.0, 25.0]
 
 
-# Soglie di decisione sulle 4 macro-classi [Auto, Camion/Bus, VRU, Barriera], tarate sui modelli v1.0-mini.
+# Soglie di decisione sulle 3 macro-classi [Auto, Camion/Bus, VRU], tarate sui modelli v1.0-mini.
 # Con --soglie si possono sostituire per singolo modello con valori calibrati
-SOGLIE_DEFAULT = [0.28, 0.25, 0.25, 0.26]
+SOGLIE_DEFAULT = [0.28, 0.25, 0.25]
 
 
-def find_checkpoint(model_key, custom_path=None):
+def find_checkpoint(model_key, custom_path=None, pesi_dir="pesi_modelli"):
     """Localizza il file di checkpoint per il modello specificato cercando nei percorsi standard."""
     if custom_path and os.path.exists(custom_path):
         return custom_path
 
     candidates = {
-        "geometric": [
-            os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_geometric.pth"),
-            os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro.pth")
-        ],
-        "semantic": [
-            os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_semantic.pth"),
-            os.path.join("pesi_modelli", "_prove", "per_zone_checkpoint_attention_neuro_semantic.pth"),
-            os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro.pth")
-        ],
         "real": [
+            os.path.join(pesi_dir, "per_zone_checkpoint_attention_real_gt.pth"),
             os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_gt.pth"),
             os.path.join("pesi_modelli", "_prove", "per_zone_checkpoint_attention_real_gt.pth")
         ],
         "positives_only": [
+            os.path.join(pesi_dir, "per_zone_checkpoint_attention_positive_only.pth"),
             os.path.join("pesi_modelli", "per_zone_checkpoint_attention_positive_only.pth"),
             os.path.join("pesi_modelli", "_prove", "per_zone_checkpoint_attention_positive_only.pth")
         ],
         "hybrid": [
+            os.path.join(pesi_dir, "per_zone_checkpoint_attention_neuro_hybrid.pth"),
             os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"),
             os.path.join("pesi_modelli", "_prove", "per_zone_checkpoint_attention_neuro_hybrid.pth")
+        ],
+        "pure_neural": [
+            os.path.join(pesi_dir, "per_zone_checkpoint_attention_pure_neural.pth"),
+            os.path.join("pesi_modelli", "per_zone_checkpoint_attention_pure_neural.pth"),
+            os.path.join("pesi_modelli", "_prove", "per_zone_checkpoint_attention_pure_neural.pth")
+        ],
+        "real_pure_neural": [
+            os.path.join(pesi_dir, "per_zone_checkpoint_attention_real_pure_neural.pth"),
+            os.path.join("pesi_modelli", "per_zone_checkpoint_attention_real_pure_neural.pth"),
+            os.path.join("pesi_modelli", "_prove", "per_zone_checkpoint_attention_real_pure_neural.pth")
         ]
     }
 
@@ -113,19 +117,24 @@ def print_table(title, counts_dict, gt_type):
         print(f"  {'MEDIA GLOBALE':<24} | {tp_tot:<6d} | {fp_tot:<6d} | {fn_tot:<6d} | {p_macro:9.1f}% | {rc_macro:9.1f}% | {f_macro:9.1f}%")
 
 
-def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
+def evaluate_models(models_dict, syn_gt_strategy="hybrid", split="val", dataroot=None, occlusions_dir=None):
     """
     Esegue la valutazione a passaggio singolo su GPU per tutti i modelli specificati,
-    calcolando simultaneamente il TRIPLO CONFRONTO (su GT Reale, GT Sintetica Geom e GT Sintetica Sem).
+    calcolando simultaneamente il DOPPIO CONFRONTO (su GT Reale e GT Sintetica Ibrida).
     Supporta: 'val' (150 scene mai viste, default), 'train' (700 scene di training), 'all' (tutte).
     """
+    if dataroot is None:
+        dataroot = os.environ.get("NUSCENES_DATAROOT", "./nuscenes")
+    if occlusions_dir is None:
+        occlusions_dir = os.environ.get("OCCLUSIONS_OUTPUT", "D:/extracted_occlusions" if os.path.exists("D:/extracted_occlusions") else "extracted_occlusions")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n• Dispositivo di calcolo: {device}")
     print(f"• Modelli da valutare ({len(models_dict)}):")
     for k, m in models_dict.items():
         print(f"    - {k} ({m['ckpt_path']})")
 
-    adapter = create_adapter("nuscenes", "./nuscenes")
+    adapter = create_adapter("nuscenes", dataroot)
     num_samples = adapter.get_num_samples()
 
     from nuscenes.utils.splits import create_splits_scenes
@@ -155,21 +164,21 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                 tok = fname.replace(".json", "").split("_")[-1]
                 bayes_lookup[tok] = os.path.join(bayes_dir, fname)
 
-    # Struttura di conteggio per ciascun modello (Quadruplo Confronto simultaneo)
+    # Struttura di conteggio per ciascun modello (Doppio Confronto: GT Reale vs GT Ibrida)
     counts = {}
     for m_key in models_dict:
         counts[m_key] = {
-            gt_type: {r: [{"tp": 0, "fp": 0, "fn": 0} for _ in range(4)] for r in RADII}
-            for gt_type in ["GT_Reale", "GT_Sintetica_Geom", "GT_Sintetica_Sem", "GT_Sintetica_Hyb"]
+            gt_type: {r: [{"tp": 0, "fp": 0, "fn": 0} for _ in range(3)] for r in RADII}
+            for gt_type in ["GT_Reale", "GT_Sintetica_Hyb"]
         }
 
     MODEL_KEY_MAP = {
         "hybrid": "NEURO_SIMB",
+        "pure_neural": "PURE_NEURAL",
         "real": "REAL_GT",
+        "real_pure_neural": "REAL_PURE_NEURAL",
         "positives_only": "POS_ONLY",
-        "bayes": "BAYES",
-        "geometric": "GEOMETRIC",
-        "semantic": "SEMANTIC"
+        "bayes": "BAYES"
     }
 
     eval_cache = {
@@ -193,13 +202,13 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
             ui_m = MODEL_KEY_MAP.get(m_k, m_k.upper())
             frame_cache["models"][ui_m] = {
                 gt_k: {
-                    "stats": {c: {"tp": 0, "fp": 0, "fn": 0, "gt_count": 0, "pred_count": 0} for c in range(4)},
+                    "stats": {c: {"tp": 0, "fp": 0, "fn": 0, "gt_count": 0, "pred_count": 0} for c in range(3)},
                     "zones": []
                 }
-                for gt_k in ["REAL", "NEURO_SIMB", "GEOMETRIC", "SEMANTIC"]
+                for gt_k in ["REAL", "NEURO_SIMB"]
             }
 
-        occ_file = os.path.join("extracted_occlusions", f"{token}.json")
+        occ_file = os.path.join(occlusions_dir, f"{token}.json")
         if not os.path.exists(occ_file):
             continue
         with open(occ_file) as f:
@@ -343,23 +352,7 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                     all_frame_boxes, sp_sub, occluder_tokens=occluder_tokens
                 )
 
-                # 2. Target GT SINTETICA GEOMETRICA a 4 macro-classi (Fitting 3D)
-                gt_geom_6, _ = compute_synthetic_ground_truth(
-                    sp=sp_sub, sp_sample=sp_sub, road_f=road_f, side_f=side_f, cross_f=cross_f,
-                    area=area, dist=dist, gt_raw_6=gt_raw_6, mode="geometric",
-                    occluder_name=occ_name, occluder_wlh=occ_wlh, use_occluder_filter=True
-                )
-                gt_geom_4 = to_macro_classes_4(gt_geom_6)
-
-                # 3. Target GT SINTETICA SEMANTICA a 4 macro-classi (Regole Naïve)
-                gt_sem_6, _ = compute_synthetic_ground_truth(
-                    sp=sp_sub, sp_sample=sp_sub, road_f=road_f, side_f=side_f, cross_f=cross_f,
-                    area=area, dist=dist, gt_raw_6=gt_raw_6, mode="semantic",
-                    occluder_name=occ_name, occluder_wlh=occ_wlh, use_occluder_filter=True
-                )
-                gt_sem_4 = to_macro_classes_4(gt_sem_6)
-
-                # 4. Target GT SINTETICA IBRIDA a 4 macro-classi (Spatio-Semantic con sosta/accosto)
+                # 2. Target GT SINTETICA IBRIDA a 3 macro-classi (Anticipazione Neuro-Simbolica)
                 gt_hyb_6, _ = compute_synthetic_ground_truth(
                     sp=sp_sub, sp_sample=sp_sub, road_f=road_f, side_f=side_f, cross_f=cross_f,
                     roadside_f=roadside_f, area=area, dist=dist, gt_raw_6=gt_raw_6, mode="hybrid",
@@ -396,41 +389,40 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                         p_auto = float(b_probs.get("Auto", 0.0))
                         p_camion = float(max(b_probs.get("Camion", 0.0), b_probs.get("Bus", 0.0), b_probs.get("Rimorchio", 0.0)))
                         p_vru = float(max(b_probs.get("Pedone", 0.0), b_probs.get("Bicicletta", 0.0), b_probs.get("Moto", 0.0)))
-                        p_barr = float(max(b_probs.get("Barriera", 0.0), b_probs.get("Cono", 0.0)))
                         if road_f < 0.05 and roadside_f < 0.15:
                             p_auto = 0.0
                             p_camion = 0.0
-                        p4 = [p_auto, p_camion, p_vru, p_barr]
+                        p4 = [p_auto, p_camion, p_vru]
                         pred_4 = np.array([
                             int(p_auto >= 0.28 and area >= 3.5),
                             int(p_camion >= 0.25 and area >= 8.0),
-                            int(p_vru >= 0.25),
-                            int(p_barr >= 0.26)
+                            int(p_vru >= 0.25)
                         ], dtype=int)
                     else:
                         model = m_info["model"]
-                        occluder_mask = AttentionPerZoneModel.build_compatibility_mask(
-                            occ_name, occ_wlh, road_f=road_f, roadside_f=roadside_f, device=device
-                        )
+                        if m_key in ["pure_neural", "real_pure_neural"]:
+                            occluder_mask = None
+                        else:
+                            occluder_mask = AttentionPerZoneModel.build_compatibility_mask(
+                                occ_name, occ_wlh, road_f=road_f, roadside_f=roadside_f, device=device
+                            )
                         out_6 = torch.sigmoid(model(patch_res, scalars, occluder_mask=occluder_mask)).squeeze(0).cpu().numpy()
 
                         p4 = [
                             float(out_6[0]),
                             float(out_6[1]),
-                            float(max(out_6[2], out_6[3], out_6[4])),
-                            float(out_6[5])
+                            float(max(out_6[2], out_6[3], out_6[4]))
                         ]
-                        soglie = m_info.get("soglie", SOGLIE_DEFAULT)
-                        pred_4 = np.zeros(4, dtype=int)
+                        soglie = m_info.get("soglie", SOGLIE_DEFAULT)[:3]
+                        pred_4 = np.zeros(3, dtype=int)
                         pred_4[0] = int(p4[0] >= soglie[0] and area >= 3.5)
                         pred_4[1] = int(p4[1] >= soglie[1] and area >= 8.0)
                         pred_4[2] = int(p4[2] >= soglie[2])
-                        pred_4[3] = int(p4[3] >= soglie[3])
 
-                    # Aggiorna conteggi globali per raggio
+                    # Aggiorna conteggi globali per raggio (Doppio Confronto)
                     for r in RADII:
                         if dist <= r:
-                            for c in range(4):
+                            for c in range(3):
                                 # A. Confronto su GT Reale nuScenes
                                 tr = int(gt_real_4[c])
                                 pr = int(pred_4[c])
@@ -438,19 +430,7 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                                 elif tr == 0 and pr == 1: counts[m_key]["GT_Reale"][r][c]["fp"] += 1
                                 elif tr == 1 and pr == 0: counts[m_key]["GT_Reale"][r][c]["fn"] += 1
 
-                                # B. Confronto su GT Sintetica Geometrica (3D Spatially-Constrained)
-                                tg = int(gt_geom_4[c])
-                                if tg == 1 and pr == 1: counts[m_key]["GT_Sintetica_Geom"][r][c]["tp"] += 1
-                                elif tg == 0 and pr == 1: counts[m_key]["GT_Sintetica_Geom"][r][c]["fp"] += 1
-                                elif tg == 1 and pr == 0: counts[m_key]["GT_Sintetica_Geom"][r][c]["fn"] += 1
-
-                                # C. Confronto su GT Sintetica Semantica (Affordance Naïve)
-                                ts = int(gt_sem_4[c])
-                                if ts == 1 and pr == 1: counts[m_key]["GT_Sintetica_Sem"][r][c]["tp"] += 1
-                                elif ts == 0 and pr == 1: counts[m_key]["GT_Sintetica_Sem"][r][c]["fp"] += 1
-                                elif ts == 1 and pr == 0: counts[m_key]["GT_Sintetica_Sem"][r][c]["fn"] += 1
-
-                                # D. Confronto su GT Sintetica Ibrida (Spazio-Semantica)
+                                # B. Confronto su GT Sintetica Ibrida (Spazio-Semantica)
                                 th = int(gt_hyb_4[c])
                                 if th == 1 and pr == 1: counts[m_key]["GT_Sintetica_Hyb"][r][c]["tp"] += 1
                                 elif th == 0 and pr == 1: counts[m_key]["GT_Sintetica_Hyb"][r][c]["fp"] += 1
@@ -459,9 +439,7 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                     # Aggiorna la cache del fotogramma per il visualizzatore
                     gt_map = {
                         "REAL": gt_real_4,
-                        "NEURO_SIMB": gt_hyb_4,
-                        "GEOMETRIC": gt_geom_4,
-                        "SEMANTIC": gt_sem_4
+                        "NEURO_SIMB": gt_hyb_4
                     }
                     pred_binary = [int(x) for x in pred_4]
                     max_class_idx = int(np.argmax(p4))
@@ -470,11 +448,11 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
                     for gt_k, gt_curr in gt_map.items():
                         gt_binary = [int(x) for x in gt_curr]
                         st = frame_cache["models"][ui_m][gt_k]["stats"]
-                        z_tps = [c for c in range(4) if pred_binary[c] == 1 and gt_binary[c] == 1]
-                        z_fps = [c for c in range(4) if pred_binary[c] == 1 and gt_binary[c] == 0]
-                        z_fns = [c for c in range(4) if pred_binary[c] == 0 and gt_binary[c] == 1]
+                        z_tps = [c for c in range(3) if pred_binary[c] == 1 and gt_binary[c] == 1]
+                        z_fps = [c for c in range(3) if pred_binary[c] == 1 and gt_binary[c] == 0]
+                        z_fns = [c for c in range(3) if pred_binary[c] == 0 and gt_binary[c] == 1]
 
-                        for c in range(4):
+                        for c in range(3):
                             if gt_binary[c] == 1: st[c]["gt_count"] += 1
                             if pred_binary[c] == 1: st[c]["pred_count"] += 1
                             if pred_binary[c] == 1 and gt_binary[c] == 1: st[c]["tp"] += 1
@@ -518,9 +496,9 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
         for ui_m in frame_cache["models"]:
             for gt_k in frame_cache["models"][ui_m]:
                 st = frame_cache["models"][ui_m][gt_k]["stats"]
-                t_tp = sum(st[c]["tp"] for c in range(4))
-                t_fp = sum(st[c]["fp"] for c in range(4))
-                t_fn = sum(st[c]["fn"] for c in range(4))
+                t_tp = sum(st[c]["tp"] for c in range(3))
+                t_fp = sum(st[c]["fp"] for c in range(3))
+                t_fn = sum(st[c]["fn"] for c in range(3))
                 pr = (t_tp / (t_tp + t_fp) * 100.0) if (t_tp + t_fp) > 0 else 0.0
                 rc = (t_tp / (t_tp + t_fn) * 100.0) if (t_tp + t_fn) > 0 else 0.0
                 f1 = (2 * pr * rc / (pr + rc)) if (pr + rc) > 0 else 0.0
@@ -545,14 +523,8 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
         # Tabella 1: Valutazione su GT Reale nuScenes
         print_table(f"1. Rilevamento Ostacoli Fisici Reali nuScenes", counts[m_key]["GT_Reale"], "GT Reale 3D")
 
-        # Tabella 2: Valutazione su GT Sintetica Geometrica
-        print_table(f"2. Anticipazione su GT Sintetica Geometrica (Fitting 3D)", counts[m_key]["GT_Sintetica_Geom"], "GT Sintetica Geometrica")
-
-        # Tabella 3: Valutazione su GT Sintetica Semantica
-        print_table(f"3. Anticipazione su GT Sintetica Semantica (Regole Naïve)", counts[m_key]["GT_Sintetica_Sem"], "GT Sintetica Semantica")
-
-        # Tabella 4: Valutazione su GT Sintetica Ibrida
-        print_table(f"4. Anticipazione su GT Sintetica Ibrida (Spazio-Semantica)", counts[m_key]["GT_Sintetica_Hyb"], "GT Sintetica Ibrida")
+        # Tabella 2: Valutazione su GT Sintetica Ibrida
+        print_table(f"2. Anticipazione su GT Sintetica Ibrida (Spazio-Semantica)", counts[m_key]["GT_Sintetica_Hyb"], "GT Sintetica Ibrida")
 
     # Tabella Comparativa Finale Riassuntiva a 25 metri
     print("\n" + "=" * 95)
@@ -564,8 +536,6 @@ def evaluate_models(models_dict, syn_gt_strategy="geometric", split="val"):
     for m_key, m_info in models_dict.items():
         name = m_info["short_name"]
         for gt_t, gt_desc in [("GT_Reale", "GT Reale nuScenes"),
-                              ("GT_Sintetica_Geom", "GT Sintetica (Geometrica)"),
-                              ("GT_Sintetica_Sem", "GT Sintetica (Semantica)"),
                               ("GT_Sintetica_Hyb", "GT Sintetica (Ibrida)")]:
             stats_list = counts[m_key][gt_t][25.0]
             tp = sum(s["tp"] for s in stats_list)
@@ -596,15 +566,13 @@ def export_markdown_results(counts, models_dict, split, eval_cache=None):
     lines = []
     lines.append(f"\n## 🏆 Risultati Valutazione Ufficiale nuScenes [Split: {split.upper()}] - {now_str}\n")
     lines.append(f"> **Split analizzato**: `{split.upper()}` (Ufficiale nuScenes)\n")
-    lines.append("### Tabella Comparativa di Sintesi a 25 Metri (Triplo Confronto)\n")
+    lines.append("### Tabella Comparativa di Sintesi a 25 Metri (Doppio Confronto)\n")
     lines.append("| Modello Addestrato | Target di Valutazione | Precision (%) | Recall (%) | F1-Score (%) |")
     lines.append("| :--- | :--- | :---: | :---: | :---: |")
 
     for m_key, m_info in models_dict.items():
         name = m_info["short_name"]
         for gt_t, gt_desc in [("GT_Reale", "GT Reale nuScenes"),
-                              ("GT_Sintetica_Geom", "GT Sintetica (Geometrica 3D)"),
-                              ("GT_Sintetica_Sem", "GT Sintetica (Semantica Naïve)"),
                               ("GT_Sintetica_Hyb", "GT Sintetica (Ibrida Spazio-Sem)")]:
             stats_list = counts[m_key][gt_t][25.0]
             tp = sum(s["tp"] for s in stats_list)
@@ -620,9 +588,7 @@ def export_markdown_results(counts, models_dict, split, eval_cache=None):
     for m_key, m_info in models_dict.items():
         lines.append(f"\n### Modello: {m_info['title']}\n")
         for gt_t, gt_desc in [("GT_Reale", "1. GT Reale nuScenes (3D Reali)"),
-                              ("GT_Sintetica_Geom", "2. GT Sintetica Geometrica (Fitting 3D)"),
-                              ("GT_Sintetica_Sem", "3. GT Sintetica Semantica (Regole Naïve)"),
-                              ("GT_Sintetica_Hyb", "4. GT Sintetica Ibrida (Spazio-Semantica)")]:
+                              ("GT_Sintetica_Hyb", "2. GT Sintetica Ibrida (Spazio-Semantica)")]:
             lines.append(f"#### {gt_desc}\n")
             for r in RADII:
                 lines.append(f"**Raggio {int(r)}m**\n")
@@ -668,16 +634,23 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Valutazione Ufficiale End-to-End con Confronto Multi-Target")
     parser.add_argument("--mode", type=str, default="all",
-                        choices=["all", "geometric", "semantic", "hybrid", "real", "positives_only", "bayes"],
-                        help="Quale modello valutare: 'geometric', 'semantic', 'hybrid', 'real', 'positives_only', 'bayes' o 'all' per tutti")
+                        choices=["all", "hybrid", "pure_neural", "real", "real_pure_neural", "positives_only", "bayes"],
+                        help="Quale modello valutare: 'hybrid', 'pure_neural', 'real', 'real_pure_neural', 'positives_only', 'bayes' o 'all' per tutti")
     parser.add_argument("--ckpt", type=str, default=None, help="Percorso checkpoint custom .pth (opzionale)")
-    parser.add_argument("--gt_mode", type=str, default="hybrid", choices=["geometric", "semantic", "hybrid"],
-                        help="Strategia della GT Sintetica di test: 'geometric', 'semantic' o 'hybrid'")
+    parser.add_argument("--gt_mode", type=str, default="hybrid", choices=["hybrid"],
+                        help="Strategia della GT Sintetica di test: 'hybrid'")
     parser.add_argument("--split", type=str, default="val", choices=["val", "train", "all"],
                         help="Split nuScenes su cui valutare: 'val' (150 scene mai viste, default), 'train' o 'all'")
     parser.add_argument("--soglie", type=str, default=None,
-                        help="File JSON con le soglie per modello, es. {\"hybrid\": [0.5, 0.4, 0.6, 0.5]} "
-                             "(ordine: Auto, Camion/Bus, VRU, Barriera). I modelli assenti usano le soglie di default")
+                        help="File JSON con le soglie per modello, es. {\"hybrid\": [0.63, 0.64, 0.69]} "
+                             "(ordine: Auto, Camion/Bus, VRU). I modelli assenti usano le soglie di default")
+    parser.add_argument("--dataroot", type=str, default=os.environ.get("NUSCENES_DATAROOT", "./nuscenes"),
+                        help="Percorso cartella nuScenes (default: ./nuscenes o env NUSCENES_DATAROOT)")
+    parser.add_argument("--occlusions_dir", type=str,
+                        default=os.environ.get("OCCLUSIONS_OUTPUT", "D:/extracted_occlusions" if os.path.exists("D:/extracted_occlusions") else "extracted_occlusions"),
+                        help="Percorso cartella JSON zone occluse (default: D:/extracted_occlusions o extracted_occlusions)")
+    parser.add_argument("--pesi_dir", type=str, default="pesi_modelli",
+                        help="Percorso cartella checkpoint modelli (default: pesi_modelli)")
     args = parser.parse_args()
 
     soglie_modelli = {}
@@ -688,30 +661,30 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model_configs = {
-        "geometric": {
-            "title": "Modello Attention su GT Sintetica Geometrica (Spatially-Constrained)",
-            "short_name": "Attention + GT Sintetica (Geometric)",
-            "default_file": "per_zone_checkpoint_attention_neuro_geometric.pth"
+        "hybrid": {
+            "title": "Modello Proposto: Attention Neuro-Simbolico Ibrido (Spazio 3D + HD-Map)",
+            "short_name": "Attention Neuro-Simbolico (Hybrid)",
+            "default_file": "per_zone_checkpoint_attention_neuro_hybrid.pth"
         },
-        "semantic": {
-            "title": "Modello Attention su GT Sintetica Semantica (Semantic-Affordance / Naïve)",
-            "short_name": "Attention + GT Sintetica (Semantic)",
-            "default_file": "per_zone_checkpoint_attention_neuro_semantic.pth"
+        "pure_neural": {
+            "title": "Studio di Ablazione: Modello Attention Puro (Senza Vincoli Neuro-Simbolici)",
+            "short_name": "Ablation Attention Puro (No Simb)",
+            "default_file": "per_zone_checkpoint_attention_pure_neural.pth"
         },
         "real": {
             "title": "Modello Baseline Attention su GT Reale Completa (18k zone nuScenes)",
             "short_name": "Baseline Attention + GT Reale Completa",
             "default_file": "per_zone_checkpoint_attention_real_gt.pth"
         },
+        "real_pure_neural": {
+            "title": "Ablation: Modello Attention su GT Reale Puro (Senza Vincoli Simbolici)",
+            "short_name": "Attention + GT Reale (Puro, No Simb)",
+            "default_file": "per_zone_checkpoint_attention_real_pure_neural.pth"
+        },
         "positives_only": {
             "title": "Modello Baseline Attention su GT Reale Positives-Only (Sole zone con ostacoli)",
             "short_name": "Baseline Attention + GT Reale (Positives Only)",
             "default_file": "per_zone_checkpoint_attention_positive_only.pth"
-        },
-        "hybrid": {
-            "title": "Modello Attention su GT Sintetica Ibrida Spazio-Semantica (Spatio-Semantic Affordance)",
-            "short_name": "Attention + GT Sintetica (Hybrid)",
-            "default_file": "per_zone_checkpoint_attention_neuro_hybrid.pth"
         },
         "bayes": {
             "title": "Baseline Analitica: Probabilità Condizionata Bayesiana (No Rete Neurale)",
@@ -739,7 +712,7 @@ def main():
             }
             continue
 
-        ckpt_path = args.ckpt if (len(selected_keys) == 1 and args.ckpt) else find_checkpoint(key)
+        ckpt_path = args.ckpt if (len(selected_keys) == 1 and args.ckpt) else find_checkpoint(key, pesi_dir=args.pesi_dir)
 
         if ckpt_path is None or not os.path.exists(ckpt_path):
             print(f"[ATTENZIONE]: Checkpoint per [{key}] non trovato su disco. Salto questo modello.")
@@ -764,7 +737,7 @@ def main():
         print("[ERRORE]: Nessun modello caricabile trovato. Controlla i checkpoint in 'pesi_modelli/'.")
         return
 
-    evaluate_models(models_to_run, syn_gt_strategy=args.gt_mode, split=args.split)
+    evaluate_models(models_to_run, syn_gt_strategy=args.gt_mode, split=args.split, dataroot=args.dataroot, occlusions_dir=args.occlusions_dir)
 
 
 if __name__ == "__main__":

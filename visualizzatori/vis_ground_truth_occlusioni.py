@@ -1,4 +1,3 @@
-# ==============================================================================
 # VISUALIZZATORE UFFICIALE TESI - GROUND TRUTH NELLE ZONE OCCLUSE (BEV NUSCENES)
 # File: visualizzatori/vis_ground_truth_occlusioni.py
 #
@@ -13,7 +12,7 @@
 # - [<- / ->] oppure [A / D]: Frame precedente / successivo
 # - [S]: Salva screenshot scientifico HD a 300 DPI
 # - Casella di testo in alto a destra: Salto diretto a qualsiasi numero di frame
-# ==============================================================================
+
 
 import os
 import sys
@@ -79,13 +78,9 @@ class GroundTruthOcclusionVisualizer:
         self.adapter = create_adapter("nuscenes", "./nuscenes")
         self.total_frames = self.adapter.get_num_samples()
         self.current_idx = 0
-        init_m = initial_mode.upper()
+        init_m = str(initial_mode).upper()
         if init_m in ["HYBRID", "IBRIDO", "SINTETICA_HYBRID", "NEURO_SIMB", "NEURO", "SINTETICA"]:
             self.gt_mode = "NEURO_SIMB"
-        elif init_m in ["GEOM", "GEOMETRIC", "GEOMETRICA", "SINTETICA_GEOM"]:
-            self.gt_mode = "GEOMETRICA"
-        elif init_m in ["SEM", "SEMANTIC", "SEMANTICA", "SINTETICA_SEM"]:
-            self.gt_mode = "SEMANTICA"
         elif init_m in ["REALE", "REAL"]:
             self.gt_mode = "REALE"
         elif init_m in ["REALE_POSITIVES", "POSITIVES", "POS_ONLY"]:
@@ -224,9 +219,8 @@ class GroundTruthOcclusionVisualizer:
         except Exception:
             pass
 
-    # =========================================================================
     # ESTRAZIONE OSTACOLI GROUND TRUTH NELLE ZONE OCCLUSE
-    # =========================================================================
+
     def get_ground_truth_occluded_boxes(self):
         """
         In modalità REALE: restituisce (occluders, occluded_boxes)
@@ -363,9 +357,8 @@ class GroundTruthOcclusionVisualizer:
 
             return real_occluders, syn_boxes
 
-    # =========================================================================
     # RENDERING CON ICONE VETTORIALI STILIZZATE E MINIMALI
-    # =========================================================================
+
     def draw_icon_object(self, ax, icon_name, center, length, deg=0.0, width=None,
                          flip_h=False, halo_color=None, halo_radius=None, z_order=8):
         """Disegna un'icona raster/vettoriale trasparente ruotata e scalata preservando le proporzioni naturali."""
@@ -433,9 +426,8 @@ class GroundTruthOcclusionVisualizer:
                       f"Figure 3: Ground Truth Zone Occluse (BEV {int(self.max_range)}m)",
                       fontsize=10.5, fontweight='bold', color='#0F172A', ha='left', va='center')
 
-        # =====================================================================
         # 1. PANNELLO SINISTRA: MAPPA BEV COMPLETA AD ALTA FEDELTÀ
-        # =====================================================================
+
         ax_map.set_facecolor(c_bg)
         ax_map.set_xlim(-self.max_range, self.max_range)
         ax_map.set_ylim(-self.max_range, self.max_range)
@@ -503,9 +495,8 @@ class GroundTruthOcclusionVisualizer:
 
             ax_map.scatter(pts_sub[:, 0], pts_sub[:, 1], s=1.1, c='#0F172A', alpha=0.60, zorder=4)
 
-        # =====================================================================
         # OSTACOLI GROUND TRUTH NELLE ZONE OCCLUSE (SOLO DENTRO LE OMBRE!)
-        # =====================================================================
+
         occluders, occluded_boxes = self.get_ground_truth_occluded_boxes()
 
         # Poligoni reali dei Coni d'Ombra (Raycasting Occlusions strettamente entro 25m)
@@ -725,9 +716,8 @@ class GroundTruthOcclusionVisualizer:
         )
         self.tooltip.set_visible(False)
 
-        # =====================================================================
         # 2. PANNELLO DESTRA ALTO: TELEMETRIA EGO & BADGE GROUND TRUTH
-        # =====================================================================
+
         ax_telemetry.set_facecolor('#F8FAFC')
         for spine in ax_telemetry.spines.values():
             spine.set_color(c_border)
@@ -854,9 +844,8 @@ class GroundTruthOcclusionVisualizer:
         ax_telemetry.set_xticks([])
         ax_telemetry.set_yticks([])
 
-        # =====================================================================
         # 3. PANNELLO DESTRA CENTRO: CONTEGGIO OSTACOLI GROUND TRUTH NELLE OMBRE
-        # =====================================================================
+
         ax_objects.set_facecolor('#FFFFFF')
         for spine in ax_objects.spines.values():
             spine.set_color(c_border)
@@ -889,9 +878,8 @@ class GroundTruthOcclusionVisualizer:
             ax_objects.text(bar.get_x() + bar.get_width()/2.0, val + 0.3, str(val),
                             ha='center', va='bottom', fontsize=9.5, fontweight='bold', color=c_border)
 
-        # =====================================================================
         # 4. PANNELLO DESTRA BASSO: LEGENDA UFFICIALE & SIMBOLOGIA
-        # =====================================================================
+
         ax_legend.set_facecolor('#FFFFFF')
         for spine in ax_legend.spines.values():
             spine.set_color(c_border)
@@ -996,13 +984,11 @@ class GroundTruthOcclusionVisualizer:
         # Menu a tendina interattivo per la selezione della modalità Ground Truth
         ax_dd = self.fig.add_axes([0.565, 0.938, 0.280, 0.036])
         mode_labels = {
-            "NEURO_SIMB": "★ GT Ibrida (Spazio+HDMap)",
-            "GEOMETRICA": "★ GT Geometrica (Fitting 3D)",
-            "SEMANTICA": "★ GT Semantica (Regole Naïve)",
-            "REALE": "GT Reale nuScenes (Tutte le Zone)",
+            "NEURO_SIMB": "★ GT Anticipazione (Ibrida)",
+            "REALE": "GT Rilevamento (Reale nuScenes)",
             "REALE_POSITIVES": "GT Reale (Solo Positivi)",
-            "SINTETICA_HYBRID": "★ GT Ibrida (Spazio+HDMap)",
-            "HYBRID": "★ GT Ibrida (Spazio+HDMap)"
+            "HYBRID": "★ GT Anticipazione (Ibrida)",
+            "SINTETICA_HYBRID": "★ GT Anticipazione (Ibrida)"
         }
         curr_lbl = mode_labels.get(self.gt_mode, self.gt_mode)
         arrow = "▲" if getattr(self, 'dropdown_open', False) else "▼"
@@ -1032,9 +1018,8 @@ class GroundTruthOcclusionVisualizer:
 
         self.fig.canvas.draw_idle()
 
-    # =========================================================================
     # GESTIONE MENU A TENDINA (DROPDOWN)
-    # =========================================================================
+
     def toggle_dropdown(self, event=None):
         self.dropdown_open = not getattr(self, 'dropdown_open', False)
         if self.dropdown_open:
@@ -1046,7 +1031,7 @@ class GroundTruthOcclusionVisualizer:
         self._hide_dropdown_menu()
         self.dropdown_open = True
 
-        self.ax_menu = self.fig.add_axes([0.565, 0.748, 0.280, 0.188], facecolor='#FFFFFF', zorder=100)
+        self.ax_menu = self.fig.add_axes([0.565, 0.822, 0.280, 0.114], facecolor='#FFFFFF', zorder=100)
         self.ax_menu.set_xticks([])
         self.ax_menu.set_yticks([])
         for spine in self.ax_menu.spines.values():
@@ -1054,14 +1039,12 @@ class GroundTruthOcclusionVisualizer:
             spine.set_linewidth(1.3)
 
         modes = [
-            ("NEURO_SIMB", "1. ★ GT Ibrida (Spazio 3D + HD-Map)"),
-            ("GEOMETRICA", "2. ★ GT Geometrica (Fitting 3D)"),
-            ("SEMANTICA", "3. ★ GT Semantica (Regole Naïve)"),
-            ("REALE", "4. GT Reale nuScenes (Tutte le Zone)"),
-            ("REALE_POSITIVES", "5. GT Reale (Solo Zone con Oggetto)")
+            ("NEURO_SIMB", "1. ★ GT Anticipazione (Ibrida)"),
+            ("REALE", "2. GT Rilevamento (Reale nuScenes)"),
+            ("REALE_POSITIVES", "3. GT Reale (Solo Positivi)")
         ]
         
-        y_offsets = [0.148, 0.111, 0.074, 0.037, 0.001]
+        y_offsets = [0.076, 0.038, 0.001]
         self.menu_buttons = []
         for (m_key, m_lbl), y_off in zip(modes, y_offsets):
             is_active = (self.gt_mode == m_key)
@@ -1069,7 +1052,7 @@ class GroundTruthOcclusionVisualizer:
             bg_col = '#EFF6FF' if is_active else '#FFFFFF'
             txt_col = '#1D4ED8' if is_active else '#334155'
             
-            ax_item = self.fig.add_axes([0.567, 0.748 + y_off, 0.276, 0.035], zorder=101)
+            ax_item = self.fig.add_axes([0.567, 0.822 + y_off, 0.276, 0.035], zorder=101)
             btn = Button(ax_item, prefix + m_lbl, color=bg_col, hovercolor='#E0F2FE')
             btn.label.set_fontsize(7.8)
             btn.label.set_fontweight('bold' if is_active else 'normal')
@@ -1113,9 +1096,8 @@ class GroundTruthOcclusionVisualizer:
         print(f"\n>>> [DROPDOWN MENU] Selezionata modalità: {self.gt_mode}")
         self.render()
 
-    # =========================================================================
     # EVENTI MOUSE & TASTIERA
-    # =========================================================================
+
     def on_key(self, event):
         if event.key in ['right', 'd', 'D']:
             self.load_frame(self.current_idx + 1)
@@ -1129,8 +1111,7 @@ class GroundTruthOcclusionVisualizer:
             print(f"\n>>> [FILTRO COMPATIBILITA OCCLUDORE] Stato: {st}")
             self.render()
         elif event.key in ['b', 'B']:
-            # Cicla tra le 5 modalità
-            mode_cycle = ["NEURO_SIMB", "GEOMETRICA", "SEMANTICA", "REALE", "REALE_POSITIVES"]
+            mode_cycle = ["NEURO_SIMB", "REALE", "REALE_POSITIVES"]
             curr_idx = mode_cycle.index(self.gt_mode) if self.gt_mode in mode_cycle else 0
             self.gt_mode = mode_cycle[(curr_idx + 1) % len(mode_cycle)]
             print(f"\n>>> [GROUND TRUTH TOGGLE] Modalità attiva: {self.gt_mode}")

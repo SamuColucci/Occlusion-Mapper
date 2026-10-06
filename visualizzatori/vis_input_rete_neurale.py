@@ -1,4 +1,3 @@
-# ==============================================================================
 # VISUALIZZATORE UFFICIALE TESI - INPUT MULTIMODALI RETE NEURALE & RETE AUSILIARIA
 # File: visualizzatori/vis_input_rete_neurale.py
 #
@@ -15,7 +14,7 @@
 #               2. Architettura della Rete Ausiliaria MLP (9 -> 64 -> 128);
 #               3. Modulazione Affine FiLM (Fattori Gamma e Beta estratti in tempo reale);
 #               4. Vincolo Neuro-Simbolico & Ammissibilità Spazio-Semantica.
-# ==============================================================================
+
 
 import os
 import sys
@@ -1008,9 +1007,8 @@ class NeuralInputsVisualizer:
             gamma_np = gamma.squeeze().cpu().numpy()
             beta_np = beta.squeeze().cpu().numpy()
 
-        # =====================================================================
         # CARD 1: I 9 DESCRITTORI SCALARI TOPOLOGICI/GEOMETRICI
-        # =====================================================================
+
         ax_card1.set_facecolor('#F8FAFC')
         for spine in ax_card1.spines.values():
             spine.set_color(c_border); spine.set_linewidth(1.0)
@@ -1046,9 +1044,8 @@ class NeuralInputsVisualizer:
             ax_card1.text(x_box + 0.015, y_box + 0.075, val_str,
                           fontsize=9.2, color=meta["color"], fontweight='bold', va='center')
 
-        # =====================================================================
         # CARD 2: ARCHITETTURA RETE AUSILIARIA MLP (9 -> 64 -> 128)
-        # =====================================================================
+
         ax_card2.set_facecolor('#F8FAFC')
         for spine in ax_card2.spines.values():
             spine.set_color(c_border); spine.set_linewidth(1.0)
@@ -1081,9 +1078,8 @@ class NeuralInputsVisualizer:
         for sp in ax_feat.spines.values():
             sp.set_color(c_border); sp.set_linewidth(0.8)
 
-        # =====================================================================
         # CARD 3: MODULAZIONE MULTIMODALE FiLM (GAMMA & BETA)
-        # =====================================================================
+
         ax_card3.set_facecolor('#FFFFFF')
         for spine in ax_card3.spines.values():
             spine.set_color(c_border); spine.set_linewidth(1.0)
@@ -1132,9 +1128,8 @@ class NeuralInputsVisualizer:
         for sp in ax_beta.spines.values():
             sp.set_color('#94A3B8'); sp.set_linewidth(0.8)
 
-        # =====================================================================
         # CARD 4: VINCOLO NEURO-SIMBOLICO & INFERENZA ATTENTION-PER-ZONE
-        # =====================================================================
+
         ax_card4.set_facecolor('#FFFFFF')
         for spine in ax_card4.spines.values():
             spine.set_color(c_border); spine.set_linewidth(1.0)
@@ -1157,17 +1152,16 @@ class NeuralInputsVisualizer:
         ax_card4.text(0.025, 0.77, f"• Occludente: {occ_name_str} ({occ_dim_str}){h_tag}",
                       fontsize=7.3, color='#475569', fontweight='bold', va='center')
 
-        # Dati delle 4 classi con stato simbolico, regola e probabilità predetta live
-        probs = active_zone.get("probs_vru", [0.0, 0.0, 0.0, 0.0])
+        # Dati delle 3 classi dinamiche con stato simbolico, regola e probabilità predetta live
+        probs = active_zone.get("probs_vru", [0.0, 0.0, 0.0])
         classes_gating = [
             ("Auto / Van", active_zone.get("auto_allowed", True), "Varco OBB ≥ 1.55m, Area ≥ 3.5m²", probs[0]),
             ("Camion / Bus", active_zone.get("truck_allowed", False), "Occludente h ≥ 1.50m, Area ≥ 8.0m²", probs[1]),
             ("VRU (Pedoni/Ciclisti)", active_zone.get("vru_allowed", True), "Prior universale su marciapiedi/strisce", probs[2]),
-            ("Barriere / Muri", active_zone.get("barrier_allowed", True), "Prossimità bordo strada e strutture", probs[3]),
         ]
 
         for i, (c_name, is_ok, rule_str, p_val) in enumerate(classes_gating):
-            y_r = 0.57 - i * 0.165
+            y_r = 0.57 - i * 0.20
             badge_c = '#15803D' if is_ok else '#DC2626'
             badge_bg = '#DCFCE7' if is_ok else '#FEE2E2'
             status_txt = "AMMESSO" if is_ok else "INIBITO"

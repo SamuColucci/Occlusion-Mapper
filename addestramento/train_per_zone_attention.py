@@ -44,6 +44,7 @@ FOTOGRAMMI_PER_BLOCCO = 1000
 # ereditano con il fork, senza ricaricare i metadati ne' ricostruire le mappe vettoriali
 adapter = None
 GT_MODE = None
+OCCLUSIONS_DIR = os.environ.get("OCCLUSIONS_OUTPUT", "extracted_occlusions")
 
 
 # Inizializzatore dei processi worker su Windows (spawn) e Linux (fork)
@@ -62,7 +63,13 @@ def genera_campioni_fotogramma(idx: int):
     frame_data = adapter.get_sample_data(idx)
     token = frame_data["sample_token"]
 
-    occ_file = os.path.join("extracted_occlusions", f"{token}.json")
+    occ_file = os.path.join(OCCLUSIONS_DIR, f"{token}.json")
+    if not os.path.exists(occ_file):
+        for candidate in ["D:/extracted_occlusions", "extracted_occlusions"]:
+            alt = os.path.join(candidate, f"{token}.json")
+            if os.path.exists(alt):
+                occ_file = alt
+                break
     if not os.path.exists(occ_file):
         return [], [], [], []
     with open(occ_file) as f:
@@ -202,6 +209,7 @@ def genera_campioni_fotogramma(idx: int):
             # Step 2: Calcolo del target in base alla modalita (applicato al poligono 25m)
             if gt_mode in ["real", "positives_only"]:
                 gt_target = np.array(gt_raw_6, dtype=np.float32)
+                gt_target[5] = 0.0  # Barriere escluse dalle classi target
             else:
                 gt_target, _ = compute_synthetic_ground_truth(
                     sp=sp_sub,
@@ -321,31 +329,28 @@ def seleziona_indici(split: str):
     return indici
 
 
-# Genera l'intero dataset distribuendolo su piu' processi e scrivendolo a blocchi
-def genera_blocchi(cartella: str, gt_mode: str, split: str, workers: int) -> None:
-    global adapter, GT_MODE
+# Genera l'intero dataset distribuendolo su piu' thread e scrivendolo a blocchi
+def genera_blocchi(cartella: str, gt_mode: str, split: str, workers: int, dataroot: str = "./nuscenes", occlusions_dir: str = None) -> None:
+    global adapter, GT_MODE, OCCLUSIONS_DIR
+    if occlusions_dir:
+        OCCLUSIONS_DIR = os.path.abspath(occlusions_dir)
 
-    print(f"• Generazione dataset [{gt_mode}] (split: {split.upper()}) su {workers} processi...")
-    adapter = create_adapter("nuscenes", "./nuscenes")
+    print(f"• Generazione dataset [{gt_mode}] (split: {split.upper()}) su {workers} workers (dataroot: {dataroot}, occlusions: {OCCLUSIONS_DIR})...", flush=True)
+    adapter = create_adapter("nuscenes", dataroot)
     indici = seleziona_indici(split)
-    print(f"• Fotogrammi dello split: {len(indici)}")
+    print(f"• Fotogrammi dello split: {len(indici)}", flush=True)
 
-    # Le mappe vengono costruite adesso, mentre il processo e' ancora unico, cosi' i figli le ereditano
     adapter.precarica_mappe()
 
-    # positives_only e' un sottoinsieme della GT reale: si generano i blocchi completi
-    # e il filtro viene applicato al caricamento, evitando di duplicare la generazione
     GT_MODE = "real" if gt_mode == "positives_only" else gt_mode
-
-    # Senza questo il garbage collector attraverserebbe i metadati nei figli, duplicandoli
-    gc.freeze()
 
     os.makedirs(cartella, exist_ok=True)
     buffer = ([], [], [], [])
     n_blocco = totale_zone = fotogrammi_nel_blocco = 0
 
-    with Pool(processes=workers, initializer=init_worker_training, initargs=(adapter, GT_MODE)) as pool:
-        for n, risultato in enumerate(pool.imap(genera_campioni_fotogramma, indici, chunksize=8), start=1):
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for n, risultato in enumerate(pool.map(genera_campioni_fotogramma, indici), start=1):
             for destinazione, prodotte in zip(buffer, risultato):
                 destinazione.extend(torch.from_numpy(x) for x in prodotte)
             fotogrammi_nel_blocco += 1
@@ -357,33 +362,57 @@ def genera_blocchi(cartella: str, gt_mode: str, split: str, workers: int) -> Non
                 n_blocco += 1
 
             if n % 500 == 0 or n == len(indici):
-                print(f"  fotogrammi {n}/{len(indici)} | zone accumulate: {totale_zone + len(buffer[0])}")
+                print(f"  fotogrammi {n}/{len(indici)} | zone accumulate: {totale_zone + len(buffer[0])}", flush=True)
 
     if buffer[0]:
         totale_zone += scrivi_blocco(cartella, n_blocco, buffer)
 
-    print(f"• Cache scritta in {cartella}: {len(elenco_blocchi(cartella))} blocchi, {totale_zone} zone")
+    print(f"• Cache scritta in {cartella}: {len(elenco_blocchi(cartella))} blocchi, {totale_zone} zone", flush=True)
 
 
-def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometric", checkpoint_path=None, split="train", force_extract=False, workers=8, cache_dir="addestramento", pesi_dir="pesi_modelli"):
+def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometric", checkpoint_path=None, split="train", force_extract=False, workers=8, cache_dir="addestramento", pesi_dir="pesi_modelli", dataroot=None, occlusions_dir=None):
     """
     Funzione di addestramento universale.
     Supporta:
       - gt_mode: 'geometric', 'semantic', 'hybrid', 'real', 'positives_only', 'all'.
       - split: 'train' (700 scene train, default), 'val' (150 scene val), 'all' (tutte).
     """
+    if occlusions_dir is None:
+        occlusions_dir = os.environ.get("OCCLUSIONS_OUTPUT", "extracted_occlusions")
+        if not os.path.exists(occlusions_dir) and os.path.exists("D:/extracted_occlusions"):
+            occlusions_dir = "D:/extracted_occlusions"
+    global OCCLUSIONS_DIR
+    OCCLUSIONS_DIR = os.path.abspath(occlusions_dir)
+    """
+    Funzione di addestramento universale.
+    Supporta:
+      - gt_mode: 'geometric', 'semantic', 'hybrid', 'real', 'positives_only', 'all'.
+      - split: 'train' (700 scene train, default), 'val' (150 scene val), 'all' (tutte).
+    """
+    if dataroot is None:
+        dataroot = os.environ.get("NUSCENES_DATAROOT", "./nuscenes")
     if epochs is None:
-        _tmp_adapter = create_adapter("nuscenes", "./nuscenes")
+        _tmp_adapter = create_adapter("nuscenes", dataroot)
         epochs = 20 if getattr(_tmp_adapter.nusc, 'version', '') == 'v1.0-mini' else 5
         print(f"• Epoche impostate automaticamente: {epochs} (dataset: {_tmp_adapter.nusc.version})")
     if gt_mode == "all":
         print("\n" + "=" * 80)
         print(f"   AVVIO ADDESTRAMENTO SEQUENZIALE DI TUTTI I MODELLI (--mode all, split: {split.upper()})")
         print("=" * 80)
-        modes_to_train = ["geometric", "semantic", "hybrid", "real", "positives_only"]
+        modes_to_train = ["hybrid", "pure_neural", "real", "real_pure_neural", "positives_only"]
+        already_force_extracted = set()
         for m in modes_to_train:
-            train_attention_neuro(epochs=epochs, batch_size=batch_size, lr=lr, gt_mode=m, split=split, force_extract=force_extract, workers=workers, cache_dir=cache_dir, pesi_dir=pesi_dir)
-        print("\n[COMPLETATO] Addestramento sequenziale di tutti i modelli terminato con successo!")
+            m_split_suffix = f"_{split}" if split != "all" else ""
+            if m in ["real", "positives_only", "real_pure_neural"]:
+                target_folder = os.path.join(cache_dir, f"cached_dataset_per_zone{m_split_suffix}_blocchi")
+            else:
+                target_folder = os.path.join(cache_dir, f"cached_dataset_neuro_{m if m != 'pure_neural' else 'hybrid'}{m_split_suffix}_blocchi")
+            
+            should_force = force_extract and (target_folder not in already_force_extracted)
+            train_attention_neuro(epochs=epochs, batch_size=batch_size, lr=lr, gt_mode=m, split=split, force_extract=should_force, workers=workers, cache_dir=cache_dir, pesi_dir=pesi_dir, dataroot=dataroot, occlusions_dir=occlusions_dir)
+            if should_force:
+                already_force_extracted.add(target_folder)
+        print("\n[COMPLETATO] Addestramento sequenziale dei 5 modelli terminato con successo!")
         return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -391,10 +420,10 @@ def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometri
     # Mappatura automatica dei percorsi checkpoint
     if checkpoint_path is None:
         ckpt_map = {
-            "geometric": os.path.join(pesi_dir, "per_zone_checkpoint_attention_neuro_geometric.pth"),
-            "semantic": os.path.join(pesi_dir, "per_zone_checkpoint_attention_neuro_semantic.pth"),
             "hybrid": os.path.join(pesi_dir, "per_zone_checkpoint_attention_neuro_hybrid.pth"),
+            "pure_neural": os.path.join(pesi_dir, "per_zone_checkpoint_attention_pure_neural.pth"),
             "real": os.path.join(pesi_dir, "per_zone_checkpoint_attention_real_gt.pth"),
+            "real_pure_neural": os.path.join(pesi_dir, "per_zone_checkpoint_attention_real_pure_neural.pth"),
             "positives_only": os.path.join(pesi_dir, "per_zone_checkpoint_attention_positive_only.pth"),
         }
         checkpoint_path = ckpt_map.get(gt_mode, os.path.join(pesi_dir, f"per_zone_checkpoint_attention_{gt_mode}.pth"))
@@ -411,15 +440,19 @@ def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometri
 
     # Gestione Cache differenziata per modalità e split
     split_suffix = f"_{split}" if split != "all" else ""
-    if gt_mode in ["real", "positives_only"]:
+    if gt_mode in ["real", "positives_only", "real_pure_neural"]:
         cache_path = os.path.join(cache_dir, f"cached_dataset_per_zone{split_suffix}.pth")
+    elif gt_mode == "pure_neural":
+        # Riutilizza la stessa cache ibrida, risparmiando tempo di estrazione
+        cache_path = os.path.join(cache_dir, f"cached_dataset_neuro_hybrid{split_suffix}.pth")
     else:
         cache_path = os.path.join(cache_dir, f"cached_dataset_neuro_{gt_mode}{split_suffix}.pth")
 
     # La cache e' suddivisa in blocchi su disco: l'intero dataset non entrerebbe in memoria
     cartella_blocchi = cache_path.replace(".pth", "_blocchi")
+    extract_mode = "hybrid" if gt_mode == "pure_neural" else ("real" if gt_mode in ["positives_only", "real_pure_neural"] else gt_mode)
     if force_extract or not elenco_blocchi(cartella_blocchi):
-        genera_blocchi(cartella_blocchi, gt_mode, split, workers)
+        genera_blocchi(cartella_blocchi, extract_mode, split, workers, dataroot=dataroot, occlusions_dir=occlusions_dir)
     else:
         print(f"• Blocchi gia' presenti: {cartella_blocchi}")
 
@@ -434,12 +467,13 @@ def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometri
 
     # Funzione di costo Asymmetric Loss Bilanciata (gamma_pos=0.5 per compromesso ideale Recall/Precision)
     # Evita l'ipersensibilità e abbatte i falsi positivi mantenendo altissima la copertura
+    # Il peso per la classe 5 (Barriere) e' impostato a 0.0: classe esclusa dall'apprendimento
     if gt_mode in ["real", "positives_only"]:
-        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05, pos_weights=[1.5, 2.5, 2.5, 2.0, 2.0, 2.5])
+        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05, pos_weights=[1.5, 2.5, 2.5, 2.0, 2.0, 0.0])
     elif gt_mode == "hybrid":
-        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05, pos_weights=[1.2, 2.2, 2.0, 1.8, 1.8, 3.5])
+        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05, pos_weights=[1.2, 2.2, 2.0, 1.8, 1.8, 0.0])
     else:
-        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05)
+        criterion = AsymmetricLoss(gamma_neg=4.0, gamma_pos=0.5, clip=0.05, pos_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 0.0])
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
@@ -465,7 +499,8 @@ def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometri
             for p_b, s_b, m_b, t_b in dataloader:
                 p_b, s_b, m_b, t_b = p_b.to(device), s_b.to(device), m_b.to(device), t_b.to(device)
                 optimizer.zero_grad()
-                logits = model(p_b, s_b, occluder_mask=m_b)
+                mask_in = None if gt_mode in ["pure_neural", "real_pure_neural"] else m_b
+                logits = model(p_b, s_b, occluder_mask=mask_in)
                 loss = criterion(logits, t_b, s_b)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -492,8 +527,8 @@ def train_attention_neuro(epochs=None, batch_size=64, lr=1e-3, gt_mode="geometri
     torch.save(ckpt_dict, checkpoint_path)
     print(f"[OK] Pesi salvati con successo in: {checkpoint_path}")
 
-    # Se geometric, aggiorna anche il default del repository
-    if gt_mode == "geometric":
+    # Se hybrid, aggiorna anche il default del repository
+    if gt_mode == "hybrid":
         default_ckpt = os.path.join(pesi_dir, "per_zone_checkpoint_attention_neuro.pth")
         torch.save(ckpt_dict, default_ckpt)
         print(f"[OK] Pesi standard aggiornati in: {default_ckpt}")
@@ -503,8 +538,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Addestramento AttentionPerZoneModel su GT Sintetica o Reale")
     parser.add_argument("--mode", "--gt_mode", dest="mode", type=str, default="hybrid",
-                        choices=["geometric", "semantic", "hybrid", "real", "positives_only", "all"],
-                        help="Modalità: 'geometric', 'semantic', 'hybrid', 'real', 'positives_only' o 'all' per addestrare tutti")
+                        choices=["hybrid", "pure_neural", "real", "real_pure_neural", "positives_only", "all"],
+                        help="Modalità: 'hybrid', 'pure_neural', 'real', 'real_pure_neural', 'positives_only' o 'all' per addestrare tutti")
     parser.add_argument("--epochs", type=int, default=None,
                         help="Numero di epoche (default automatico: 20 su v1.0-mini, 5 su v1.0-trainval)")
     parser.add_argument("--workers", type=int, default=8,
@@ -518,7 +553,11 @@ if __name__ == "__main__":
                              "Su trainval la cache occupa ~100 GB per modalita', puo' servire un disco esterno")
     parser.add_argument("--pesi_dir", type=str, default="pesi_modelli",
                         help="Cartella in cui salvare i checkpoint addestrati (default: pesi_modelli/)")
+    parser.add_argument("--dataroot", type=str, default=os.environ.get("NUSCENES_DATAROOT", "./nuscenes"),
+                        help="Cartella radice nuScenes (default: ./nuscenes o env NUSCENES_DATAROOT)")
+    parser.add_argument("--occlusions_dir", type=str, default=None,
+                        help="Cartella contenente i JSON di raycasting (default: extracted_occlusions o D:/extracted_occlusions)")
     args = parser.parse_args()
 
     train_attention_neuro(epochs=args.epochs, batch_size=args.batch_size, gt_mode=args.mode, split=args.split,
-                          force_extract=args.force, workers=args.workers, cache_dir=args.cache_dir, pesi_dir=args.pesi_dir)
+                          force_extract=args.force, workers=args.workers, cache_dir=args.cache_dir, pesi_dir=args.pesi_dir, dataroot=args.dataroot, occlusions_dir=args.occlusions_dir)
