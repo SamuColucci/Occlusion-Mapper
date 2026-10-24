@@ -6,14 +6,28 @@
 
 ## 1. Setup Ambiente
 
-```powershell
-# Creazione e attivazione ambiente virtuale
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+### Opzione A: Con Conda (Consigliato in Laboratorio / Server GPU)
+```bash
+# Creazione ambiente da file environment.yml
+conda env create -f environment.yml
 
-# Installazione librerie richieste
+# Attivazione
+conda activate occlusion-mapper
+```
+*Oppure creazione manuale:*
+```bash
+conda create -n occlusion-mapper python=3.10 -y
+conda activate occlusion-mapper
 pip install -r requirements.txt
 ```
+
+### Opzione B: Con venv standard (Windows / Standalone)
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
 
 ---
 

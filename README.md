@@ -82,16 +82,20 @@ Verifica della focalizzazione visiva dei filtri convoluzionali e dell'attribuzio
 
 ---
 
-## ⚡ Installazione Rapida
+### Metodo 1: Con Conda (Consigliato per PC Laboratorio / Server GPU / Linux)
+```bash
+# Creazione e attivazione ambiente da file environment.yml
+conda env create -f environment.yml
+conda activate occlusion-mapper
+```
 
+### Metodo 2: Con Python venv (Standard / Windows)
 ```powershell
-# 1. Creazione e attivazione ambiente virtuale
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-
-# 2. Installazione delle dipendenze
 pip install -r requirements.txt
 ```
+
 
 ---
 

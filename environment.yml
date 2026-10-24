@@ -1,0 +1,22 @@
+name: occlusion-mapper
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - nuscenes-devkit>=1.1.10
+      - pyquaternion>=0.9.9
+      - shapely>=2.0.0
+      - opencv-python-headless
+      - matplotlib>=3.8.0
+      - scikit-learn>=1.4.0
+      - scipy
+      - tqdm
+      - fire
+      - descartes
+      - torch
+      - torchvision
