@@ -13,6 +13,7 @@ import gc
 import time
 import json
 import random
+import zlib
 import torch
 from multiprocessing import Pool
 import numpy as np
@@ -269,10 +270,21 @@ def elenco_blocchi(cartella: str):
     return sorted(os.path.join(cartella, f) for f in os.listdir(cartella) if f.endswith(".pth"))
 
 
-# Carica un blocco riportando le patch a float32: su disco sono in float16 per dimezzare
-# spazio e tempo di lettura, che sono il vero collo di bottiglia dell'addestramento
-def carica_blocco(percorso: str, gt_mode: str):
+# Legge un blocco della cache restituendo le patch in float16. Le patch sono per ~90% zeri
+# (maschera dei 25m e canali ostacoli quasi vuoti): su disco sono compresse con zlib senza
+# perdita (circa x30 di spazio in meno). I blocchi non compressi delle versioni precedenti restano leggibili
+def leggi_blocco(percorso: str) -> dict:
     dati = torch.load(percorso)
+    if "patches_zlib" in dati:
+        grezzi = zlib.decompress(dati.pop("patches_zlib").numpy().tobytes())
+        forma = [int(x) for x in dati.pop("patches_shape")]
+        dati["patches"] = torch.from_numpy(np.frombuffer(grezzi, dtype=np.float16).reshape(forma).copy())
+    return dati
+
+
+# Carica un blocco riportando le patch a float32 per l'addestramento
+def carica_blocco(percorso: str, gt_mode: str):
+    dati = leggi_blocco(percorso)
     patches = dati["patches"].float()
     scalars, masks, targets = dati["scalars"], dati["masks"], dati["targets"]
 
@@ -287,8 +299,11 @@ def carica_blocco(percorso: str, gt_mode: str):
 # Scrive un blocco in modo atomico, cosi' un'interruzione non lascia un file troncato
 def scrivi_blocco(cartella: str, numero: int, buffer) -> int:
     percorso = os.path.join(cartella, f"blocco_{numero:04d}.pth")
+    patches = torch.stack(buffer[0]).half().numpy()
+    compresse = zlib.compress(np.ascontiguousarray(patches).tobytes(), 1)
     contenuto = {
-        "patches": torch.stack(buffer[0]).half(),
+        "patches_zlib": torch.frombuffer(bytearray(compresse), dtype=torch.uint8),
+        "patches_shape": torch.tensor(patches.shape),
         "scalars": torch.stack(buffer[1]),
         "masks": torch.stack(buffer[2]),
         "targets": torch.stack(buffer[3]),

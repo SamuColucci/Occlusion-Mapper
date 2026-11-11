@@ -14,6 +14,7 @@ import torch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
+from addestramento.train_per_zone_attention import leggi_blocco
 
 CATEGORIE = ["Auto", "Camion/Bus", "VRU"]
 
@@ -79,7 +80,7 @@ def main():
 
         prob_l, vero_l, area_l = [], [], []
         for nome in scelti:
-            dati = torch.load(os.path.join(percorso, nome))
+            dati = leggi_blocco(os.path.join(percorso, nome))
             targets = dati["targets"]
             # positives_only si addestra solo sulle zone con ostacoli, ma viene valutato su tutte:
             # le soglie si calibrano quindi sull'insieme completo delle zone

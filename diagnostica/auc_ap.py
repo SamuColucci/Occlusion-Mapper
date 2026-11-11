@@ -3,7 +3,8 @@ import sys, torch, numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve
 sys.path.insert(0, ".")
 from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
-C = "/media/vrlab/Extreme Pro/occlusion_mapper_cache/"
+from addestramento.train_per_zone_attention import leggi_blocco
+C = (sys.argv[1] if len(sys.argv) > 1 else "addestramento").rstrip("/") + "/"   # cartella della cache (--cache_dir del training)
 CACHE = {"hybrid": C + "cached_dataset_neuro_hybrid_train_blocchi", "real": C + "cached_dataset_per_zone_train_blocchi"}
 BLOCCHI = ["blocco_0002.pth", "blocco_0013.pth", "blocco_0024.pth"]
 # modello -> GT su cui e' stato addestrato
@@ -16,7 +17,7 @@ dev = "cuda"
 
 dati = {}
 for k, cart in CACHE.items():
-    parti = [torch.load(f"{cart}/{b}") for b in BLOCCHI]
+    parti = [leggi_blocco(f"{cart}/{b}") for b in BLOCCHI]
     dati[k] = {c: torch.cat([p[c] for p in parti]) for c in ["patches", "scalars", "masks", "targets"]}
     print(f"cache {k}: {len(dati[k]['targets'])} zone", flush=True)
 
