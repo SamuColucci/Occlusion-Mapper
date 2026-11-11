@@ -54,88 +54,126 @@ La pipeline trasforma la nuvola di punti grezza del LiDAR in un verdetto di sicu
 ## 3. Requisiti e Configurazione Ambiente
 
 ### Requisiti di Sistema
-* **Sistema Operativo**: Windows 10/11 o Linux (Ubuntu 20.04+)
-* **Python**: 3.11
-* **GPU**: NVIDIA con supporto CUDA (consigliata per addestramento veloce; l'inferenza e i visualizzatori girano anche su CPU)
-* **Dataset**: nuScenes (`v1.0-mini` per test rapidi, `v1.0-trainval` per il benchmark completo)
+* **Sistema Operativo**: Linux (Ubuntu 20.04+) o Windows 10/11
+* **Python**: 3.10 (definito in `environment.yml`)
+* **GPU**: NVIDIA con supporto CUDA (consigliata per l'addestramento; inferenza e visualizzatori girano anche su CPU)
+* **Dataset**: nuScenes `v1.0-trainval` con la **Map Expansion v1.3** per il benchmark completo; `v1.0-mini` per i test rapidi
 
-### Installazione Dipendenze
-Apri un terminale (PowerShell o Bash) nella cartella radice del progetto:
+### Installazione con Conda (consigliata)
+```bash
+conda env create -f environment.yml
+conda activate occlusion-mapper
+```
+Se l'ambiente esiste già, aggiornalo con `conda env update -n occlusion-mapper -f environment.yml`.
 
+**GPU meno recenti o driver NVIDIA < 580** (es. Quadro P4000 con driver 565): `environment.yml` installa l'ultima versione di PyTorch, compilata per CUDA 13, che su questi sistemi non si avvia (`ImportError ... libtorch_cuda.so`). Sostituiscila con la build per CUDA 12.6:
+```bash
+pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126
+pip install "numpy<2"        # nuscenes-devkit richiede numpy < 2
+```
+
+### Installazione con venv (Windows / standalone)
 ```powershell
-# 1. Creazione ambiente virtuale (tramite venv o conda)
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-
-# 2. Installazione librerie richieste
 pip install -r requirements.txt
 ```
+
+### Dataset e Pesi dei Modelli
+* **Dataset**: tutti gli script leggono nuScenes da `./nuscenes`. Alcuni accettano anche `--dataroot` o la variabile `NUSCENES_DATAROOT`, ma lo smoke test e diversi visualizzatori usano solo `./nuscenes`. La cartella deve avere la struttura standard di nuScenes: `v1.0-trainval/`, `samples/LIDAR_TOP/` e `maps/` con `maps/expansion/*.json` della Map Expansion v1.3. Se il dataset sta su un hard disk esterno, collegalo una volta con:
+  ```bash
+  ln -s /media/$USER/ExtremePro/nuscenes nuscenes
+  ```
+  Se il disco viene montato con un altro nome, ricrea il collegamento con `ln -sfn <nuovo percorso>/nuscenes nuscenes`.
+* **Pesi**: i checkpoint `.pth` stanno in `pesi_modelli/` dentro il progetto. Sono esclusi da git e vanno copiati a mano quando si clona il repository su un altro PC. I modelli senza checkpoint vengono segnalati e non valutati da `evaluate_final_official.py`.
+
+### Verifica dell'Installazione
+```bash
+python smoke_test.py
+```
+Il test controlla, in ordine: librerie, caricamento del dataset, raycasting su 2 frame, caricamento del checkpoint `neuro_hybrid`, forward pass della rete e agente neurale. Deve terminare con `SMOKE TEST SUPERATO CON SUCCESSO` e senza avvisi `Checkpoint ... non trovato`.
 
 ---
 
 ## 4. Guida ai Comandi di Esecuzione
 
-Tutti i comandi sottostanti utilizzano l'interprete dell'ambiente virtuale (`.\.venv\Scripts\python.exe` su Windows o `python` se l'ambiente è attivato).
+I comandi presuppongono l'ambiente attivo e la cartella del progetto come cartella corrente. Su Windows con venv, sostituisci `python` con `.\.venv\Scripts\python.exe`.
 
 ### A. Run Completa da Zero (Pipeline End-to-End)
-Se desideri rieseguire l'intero processo da zero (estrazione zone, addestramento del modello ibrido, calibrazione soglie e benchmark):
+Per rieseguire l'intero processo (estrazione zone, addestramento del modello ibrido, calibrazione soglie e benchmark):
 
-```powershell
-# Passo 1: Estrazione varchi occlusi via raycasting 3D (multiprocessing su 8 core)
-.\.venv\Scripts\python.exe estrazione_zone_occluse.py --workers 8
+```bash
+# Passo 1: Estrazione varchi occlusi via raycasting 3D (multiprocessing su 8 core) -> extracted_occlusions/
+python estrazione_zone_occluse.py --workers 8
 
 # Passo 2: Addestramento del modello proposto (Ibrido Neuro-Simbolico)
-.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py --mode hybrid --split train --workers 8
+python addestramento/train_per_zone_attention.py --mode hybrid --split train --workers 8
 
-# Passo 3: Calibrazione fine delle soglie decisionali (F1 ottimizzato su train)
-.\.venv\Scripts\python.exe valutazione/calibra_soglie.py
+# Passo 3: Calibrazione delle soglie decisionali (F1 ottimizzato su train) -> valutazione/soglie_calibrate.json
+python valutazione/calibra_soglie.py
 
-# Passo 4: Valutazione ufficiale sui 6.019 fotogrammi inediti di validazione
-.\.venv\Scripts\python.exe valutazione/evaluate_final_official.py --mode hybrid --split val
+# Passo 4: Valutazione ufficiale sui 6.019 fotogrammi inediti di validazione, con le soglie calibrate
+python valutazione/evaluate_final_official.py --mode hybrid --split val --soglie valutazione/soglie_calibrate.json
 ```
+
+Note:
+* L'estrazione salta i frame già elaborati; usa `--rigenera` per ricalcolarli tutti.
+* Il training salva il dataset di addestramento in una cache a blocchi (`--cache_dir`, default `addestramento/`) e la riusa nelle esecuzioni successive; `--force` la rigenera.
+* Senza `--soglie` la valutazione usa le soglie di default dello script, non quelle calibrate.
 
 ---
 
 ### B. Addestramento dei Modelli per Studio Comparativo (Ablazione)
-Per confrontare le prestazioni del modello ibrido con le varianti di controllo descritte nella tesi:
 
-```powershell
-# 1. Modello Proposto (Ibrido Neuro-Simbolico su GT Spazio-Semantica)
-.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py --mode hybrid
+| `--mode` | Descrizione | Checkpoint generato in `pesi_modelli/` |
+|---|---|---|
+| `hybrid` | **Modello proposto**: Ibrido Neuro-Simbolico su GT spazio-semantica | `per_zone_checkpoint_attention_neuro_hybrid.pth` |
+| `pure_neural` | Ablazione: senza vincoli fisici neuro-simbolici | `per_zone_checkpoint_attention_pure_neural.pth` |
+| `real` | Baseline: box 3D annotati da annotatori umani | `per_zone_checkpoint_attention_real_gt.pth` |
+| `real_pure_neural` | Baseline reale senza vincoli simbolici | `per_zone_checkpoint_attention_real_pure_neural.pth` |
+| `positives_only` | Baseline reale addestrata sulle sole zone con ostacoli | `per_zone_checkpoint_attention_positive_only.pth` |
+| `all` | Tutte le varianti in sequenza | — |
 
-# 2. Modello Ablation Puro (Senza Vincoli Fisici Neuro-Simbolici)
-.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py --mode pure_neural
-
-# 3. Baseline Reale (Addestrato esclusivamente sui box 3D annotati da annotatori umani)
-.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py --mode real
-
-# 4. Addestramento di tutte le varianti in sequenza
-.\.venv\Scripts\python.exe addestramento/train_per_zone_attention.py --mode all
+```bash
+python addestramento/train_per_zone_attention.py --mode hybrid
+python addestramento/train_per_zone_attention.py --mode all
 ```
+Altre opzioni: `--epochs N` (default automatico), `--batch_size 64`, `--split train|val|all`, `--pesi_dir`, `--dataroot`.
 
 ---
 
 ### C. Valutazione e Benchmark Ufficiale
-Lo script di valutazione confronta automaticamente ciascun modello sia con la **Ground Truth Reale** (oggetti fisicamente nascosti) sia con la **Ground Truth Ibrida** (affordance potenziale di transito):
+Lo script di valutazione confronta ciascun modello sia con la **Ground Truth Reale** (oggetti fisicamente nascosti) sia con la **Ground Truth Ibrida** (affordance potenziale di transito). Con `--mode all` include anche la baseline analitica **bayesiana** (`bayes`), che non usa una rete neurale:
 
-```powershell
-# Valutazione solo del Modello Ibrido su split di validazione (150 scene mai viste)
-.\.venv\Scripts\python.exe valutazione/evaluate_final_official.py --mode hybrid --split val
+```bash
+# Solo il Modello Ibrido sullo split di validazione (150 scene mai viste)
+python valutazione/evaluate_final_official.py --mode hybrid --split val --soglie valutazione/soglie_calibrate.json
 
-# Valutazione comparativa completa (Tutti i modelli insieme per generare la tabella comparativa)
-.\.venv\Scripts\python.exe valutazione/evaluate_final_official.py --mode all --split val
+# Valutazione comparativa completa (tutti i modelli)
+python valutazione/evaluate_final_official.py --mode all --split val --soglie valutazione/soglie_calibrate.json
 ```
+Per valutare un checkpoint diverso da quello predefinito: `--ckpt percorso/modello.pth`.
+
+---
+
+### D. Spiegabilità (XAI)
+```bash
+python diagnostica/genera_xai_shap_gradcam.py
+```
+Genera le figure Grad-CAM (attivazioni spaziali) e SHAP (importanza dei 9 descrittori scalari) per il modello ibrido, in `Figure/` e `documentazione/immagini_tesi/`.
 
 ---
 
 ## 5. File Generati in Automatico dopo la Valutazione
 
-Al termine dell'esecuzione di `evaluate_final_official.py`, il sistema genera automaticamente due file fondamentali:
+Al termine di `evaluate_final_official.py` vengono generati o aggiornati:
 
-1. **`documentazione/RISULTATI_VALUTAZIONE_VAL.md`** (o `RISULTATI_VALUTAZIONE_ALL.md`):
-   * Contiene le tabelle comparative formattate in Markdown con Precision, Recall e F1-Score per ciascun modello, disaggregate per categoria semantica (Auto, Camion/Bus, VRU) e per raggio di distanza (10m, 15m, 20m, 25m).
-2. **`valutazione/cache_valutazione_val.json`**:
-   * File di cache contenente le predizioni, i verdetti di sicurezza (True Positive, False Positive, False Negative) e i punteggi di confidenza per ogni singola zona occlusa analizzata. Questa cache alimenta i visualizzatori grafici senza richiedere ricalcoli.
+1. **`documentazione/RISULTATI_VALUTAZIONE_<SPLIT>.md`** (es. `RISULTATI_VALUTAZIONE_VAL.md`):
+   * Tabelle comparative con Precision, Recall e F1-Score per ciascun modello, divise per categoria semantica (Auto, Camion/Bus, VRU) e per raggio di distanza (10m, 15m, 20m, 25m).
+2. **`documentazione/TABELLA_RISULTATI_COMPLETA.md`**:
+   * Tabella riassuntiva ufficiale dei risultati, aggiornata a ogni valutazione.
+3. **`valutazione/cache_valutazione_<split>.json`**:
+   * Predizioni, verdetti (True Positive, False Positive, False Negative) e punteggi di confidenza per ogni zona occlusa. Questa cache alimenta la dashboard dei visualizzatori senza ricalcoli.
 
 ---
 
@@ -143,28 +181,31 @@ Al termine dell'esecuzione di `evaluate_final_official.py`, il sistema genera au
 
 I visualizzatori permettono di ispezionare visivamente ciò che accade in ogni frame:
 
-```powershell
+```bash
 # 1. Raycasting e Coni d'Ombra (Mappa BEV con varchi d'ombra e strutture urbane)
-.\.venv\Scripts\python.exe visualizzatori/vis_raycasting_occlusioni.py 17
+python visualizzatori/vis_raycasting_occlusioni.py 17
 
-# 2. Input Multimodali Rete Neurale (Mostra i canali BEV e i 9 descrittori scalari FiLM)
-.\.venv\Scripts\python.exe visualizzatori/vis_input_rete_neurale.py 17
+# 2. Input Multimodali Rete Neurale (canali BEV e 9 descrittori scalari FiLM)
+python visualizzatori/vis_input_rete_neurale.py 17
 
-# 3. Inferenza Neurale Live (Mappa delle probabilità stimate per ogni zona d'ombra)
-.\.venv\Scripts\python.exe visualizzatori/vis_inferenza_neurale.py 17
+# 3. Inferenza Neurale Live (probabilità stimate per ogni zona d'ombra)
+#    --model NEURO_SIMB | PURE_NEURAL | REAL_GT | REAL_PURE_NEURAL | POS_ONLY
+python visualizzatori/vis_inferenza_neurale.py 17
 
 # 4. Ground Truth Duale a Confronto (GT Reale 3D vs GT Sintetica Ibrida)
-.\.venv\Scripts\python.exe visualizzatori/vis_ground_truth_occlusioni.py 17
+python visualizzatori/vis_ground_truth_occlusioni.py 17
 
-# 5. Dashboard di Valutazione Prestazioni (Verdetti TP, FP, FN con box comparativi)
-.\.venv\Scripts\python.exe visualizzatori/vis_valutazione_prestazioni.py 17
+# 5. Dashboard di Valutazione Prestazioni (verdetti TP, FP, FN; richiede una valutazione già eseguita)
+python visualizzatori/vis_valutazione_prestazioni.py 17
 
-# 6. Ispezione Dati Grezzi nuScenes (LiDAR 3D + telecamere surround sincronizzate)
-.\.venv\Scripts\python.exe visualizzatori/vis_nuscenes_raw.py 17
+# 6. Dati Grezzi nuScenes prima del raycasting (LiDAR, box 3D annotati, mappa HD)
+python visualizzatori/vis_nuscenes_raw.py 17
 ```
 
+Con `--save` la figura del frame viene salvata subito a 300 DPI in `documentazione/immagini_tesi/`. Alcuni visualizzatori limitano il frame iniziale all'intervallo 1-404 (quello della `v1.0-mini`).
+
 ### Controlli da Tastiera nei Visualizzatori:
-* `Freccia Destra (->)` / `Freccia Sinistra (<-)`: Avanza o retrocede di un fotogramma.
-* `Click Sinistro` su una zona: Mostra nel pannello laterale i dettagli analitici (probabilità, dimensioni, classi predette).
-* `T`: Attiva/disattiva livelli grafici ausiliari (overlay semantici della mappa HD).
-* `S`: Salva uno screenshot ad alta risoluzione del fotogramma corrente.
+* `Freccia Destra (->)` / `Freccia Sinistra (<-)`: avanza o retrocede di un fotogramma.
+* `Click Sinistro` su una zona: mostra nel pannello laterale i dettagli analitici (probabilità, dimensioni, classi predette).
+* `T`: attiva/disattiva i livelli grafici ausiliari (overlay semantici della mappa HD).
+* `S`: salva uno screenshot ad alta risoluzione del fotogramma corrente.
