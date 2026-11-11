@@ -28,6 +28,14 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+---
+
+## ⚡ Test Rapido di Funzionamento (Smoke Test in 10 secondi)
+Verifica istantaneamente che pacchetti, dataset nuScenes, raycasting LiDAR e pesi PyTorch funzionino:
+```bash
+python smoke_test.py
+```
+
 
 ---
 
