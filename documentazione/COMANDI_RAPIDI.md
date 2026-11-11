@@ -93,6 +93,9 @@ Opzioni: `--epochs N`, `--batch_size 64`, `--force` (rigenera la cache), `--cach
 ## 5. Valutazione e Benchmark Ufficiale
 
 ```bash
+# Baseline bayesiana (senza rete): da eseguire una volta prima di --mode all
+python inferenza_agenti/bayes_agent.py
+
 # Benchmark comparativo di tutti i modelli (incluso il baseline bayesiano)
 python valutazione/evaluate_final_official.py --mode all --split val --soglie valutazione/soglie_calibrate.json
 

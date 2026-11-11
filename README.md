@@ -167,11 +167,16 @@ python valutazione/evaluate_final_official.py --mode hybrid --split val --soglie
 python addestramento/train_per_zone_attention.py --mode pure_neural
 python addestramento/train_per_zone_attention.py --mode all
 
+# Baseline bayesiana (senza rete): genera extracted_occlusions_probabilities/, necessaria per --mode all
+python inferenza_agenti/bayes_agent.py
+
 # Valutazione comparativa di tutti i modelli insieme
 python valutazione/evaluate_final_official.py --mode all --split val --soglie valutazione/soglie_calibrate.json
 ```
 
 Opzioni utili del training: `--epochs N`, `--batch_size 64`, `--force` (rigenera la cache del dataset), `--cache_dir` (cartella della cache a blocchi, default `addestramento/`), `--pesi_dir` (default `pesi_modelli/`).
+
+La cache del training è compressa senza perdita: circa 1-2 GB per ciascuna delle due cache (`hybrid`/`pure_neural` e `real`/`real_pure_neural`/`positives_only`). Le cache non compresse delle versioni precedenti restano leggibili.
 
 ---
 

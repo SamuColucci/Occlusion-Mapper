@@ -118,7 +118,7 @@ python valutazione/evaluate_final_official.py --mode hybrid --split val --soglie
 
 Note:
 * L'estrazione salta i frame già elaborati; usa `--rigenera` per ricalcolarli tutti.
-* Il training salva il dataset di addestramento in una cache a blocchi (`--cache_dir`, default `addestramento/`) e la riusa nelle esecuzioni successive; `--force` la rigenera.
+* Il training salva il dataset di addestramento in una cache a blocchi (`--cache_dir`, default `addestramento/`) e la riusa nelle esecuzioni successive; `--force` la rigenera. Le patch sono compresse senza perdita, quindi ogni cache occupa circa 1-2 GB invece di ~40 GB.
 * Senza `--soglie` la valutazione usa le soglie di default dello script, non quelle calibrate.
 
 ---
@@ -148,6 +148,9 @@ Lo script di valutazione confronta ciascun modello sia con la **Ground Truth Rea
 ```bash
 # Solo il Modello Ibrido sullo split di validazione (150 scene mai viste)
 python valutazione/evaluate_final_official.py --mode hybrid --split val --soglie valutazione/soglie_calibrate.json
+
+# Probabilita' della baseline bayesiana (una volta, prima di --mode all) -> extracted_occlusions_probabilities/
+python inferenza_agenti/bayes_agent.py
 
 # Valutazione comparativa completa (tutti i modelli)
 python valutazione/evaluate_final_official.py --mode all --split val --soglie valutazione/soglie_calibrate.json
