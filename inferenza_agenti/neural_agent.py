@@ -201,10 +201,8 @@ class PerZoneOcclusionAgent:
         # Selezione automatica del checkpoint disponibile se non fornito esplicitamente
         if checkpoint_path is None:
             raw_candidates = [
+                "per_zone_checkpoint_attention_neuro_hybrid.pth",
                 "per_zone_checkpoint_attention_neuro.pth",
-                "per_zone_checkpoint_asl_standard.pth",
-                "per_zone_checkpoint_surrounding.pth",
-                "per_zone_checkpoint.pth"
             ]
             candidates = []
             # Crea una lista di checkpoint candidati da provare in ordine di priorità
@@ -212,16 +210,12 @@ class PerZoneOcclusionAgent:
                 candidates.append(os.path.join("pesi_modelli", c))
                 candidates.append(c)
             # Seleziona il primo checkpoint candidato che esiste, altrimenti seleziona il checkpoint di default
-            checkpoint_path = next((c for c in candidates if os.path.exists(c)), os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro.pth"))
+            checkpoint_path = next((c for c in candidates if os.path.exists(c)), os.path.join("pesi_modelli", "per_zone_checkpoint_attention_neuro_hybrid.pth"))
 
         self.checkpoint_used = checkpoint_path
-        # Se il checkpoint contiene "attention", usa il modello con attenzione, altrimenti usa il modello standard
-        if "attention" in checkpoint_path.lower():
-            from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
-            self.model = AttentionPerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(self.device)
-        else:
-            from architettura_neurale.per_zone_model import PerZoneModel
-            self.model = PerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(self.device)
+        # Modello con Channel-Attention (unica architettura supportata: per_zone_model.py e' stato rimosso)
+        from architettura_neurale.attention_per_zone_model import AttentionPerZoneModel
+        self.model = AttentionPerZoneModel(in_channels=11, num_scalars=9, num_classes=6).to(self.device)
 
         # Carica i pesi del modello se il checkpoint esiste
         if os.path.exists(checkpoint_path):
